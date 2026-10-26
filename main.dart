@@ -49,7 +49,23 @@ Future<void> main() async {
   player.playingStream.listen((_) => saveState());
   Timer.periodic(const Duration(seconds: 5), (_) { if (player.playing) saveState(); });
   runApp(const CadenceApp());
-  if (Platform.isAndroid) { Future.delayed(const Duration(seconds: 2), () => Permission.notification.request()); }
+}
+
+Future<void> askBgPermissions() async {
+  if (!Platform.isAndroid) return;
+  try {
+    var n = await Permission.notification.status;
+    if (!n.isGranted) n = await Permission.notification.request();
+    if (!n.isGranted) {
+      msgKey.currentState?..hideCurrentSnackBar()..showSnackBar(SnackBar(
+          duration: const Duration(seconds: 12),
+          content: const Text('Allow notifications to control music from the lock screen and notification panel.'),
+          action: SnackBarAction(label: 'Settings', onPressed: () { openAppSettings(); })));
+    }
+    if (!await Permission.ignoreBatteryOptimizations.isGranted) {
+      await Permission.ignoreBatteryOptimizations.request();
+    }
+  } catch (_) {}
 }
 
 Route<T> slideUp<T>(Widget w) => PageRouteBuilder<T>(
@@ -229,7 +245,11 @@ class Home extends StatefulWidget { const Home({super.key}); @override State<Hom
 class _HomeS extends State<Home> with WidgetsBindingObserver {
   int i = 0;
   @override
-  void initState() { super.initState(); WidgetsBinding.instance.addObserver(this); }
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) => Future.delayed(const Duration(milliseconds: 800), askBgPermissions));
+  }
   @override
   void dispose() { WidgetsBinding.instance.removeObserver(this); super.dispose(); }
   @override
