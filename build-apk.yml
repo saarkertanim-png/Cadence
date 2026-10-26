@@ -20,9 +20,11 @@ jobs:
         run: |
           flutter create --org com.tanimsarker --project-name cadence --platforms=android,ios app
           rm -rf app/lib app/test
-          cp -r lib app/lib
-          cp pubspec.yaml app/pubspec.yaml
-          python3 tool/patch_native.py app
+          mkdir -p app/lib
+          cp "$(find . -path ./app -prune -o -name main.dart -print | head -n1)" app/lib/main.dart
+          cp "$(find . -path ./app -prune -o -name library.dart -print | head -n1)" app/lib/library.dart
+          cp "$(find . -path ./app -prune -o -name pubspec.yaml -print | head -n1)" app/pubspec.yaml
+          python3 "$(find . -path ./app -prune -o -name patch_native.py -print | head -n1)" app
       - name: Build release APK
         working-directory: app
         run: |
@@ -44,19 +46,27 @@ jobs:
         run: |
           flutter create --org com.tanimsarker --project-name cadence --platforms=android,ios app
           rm -rf app/lib app/test
-          cp -r lib app/lib
-          cp pubspec.yaml app/pubspec.yaml
-          python3 tool/patch_native.py app
+          mkdir -p app/lib
+          cp "$(find . -path ./app -prune -o -name main.dart -print | head -n1)" app/lib/main.dart
+          cp "$(find . -path ./app -prune -o -name library.dart -print | head -n1)" app/lib/library.dart
+          cp "$(find . -path ./app -prune -o -name pubspec.yaml -print | head -n1)" app/pubspec.yaml
+          python3 "$(find . -path ./app -prune -o -name patch_native.py -print | head -n1)" app
       - name: Build iOS (unsigned)
         working-directory: app
         run: |
           flutter pub get
-          flutter build ios --release --no-codesign
-          cd build/ios/iphoneos
+          flutter build ios --config-only --release --no-codesign
+          cd ios
+          xcodebuild -workspace Runner.xcworkspace -scheme Runner \
+            -configuration Release -sdk iphoneos \
+            -derivedDataPath ../build/dd \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+          cd ..
           mkdir Payload
-          cp -r Runner.app Payload/
+          cp -r build/dd/Build/Products/Release-iphoneos/Runner.app Payload/
           zip -qr Cadence-unsigned.ipa Payload
       - uses: actions/upload-artifact@v4
         with:
           name: Cadence-ios-unsigned-ipa
-          path: app/build/ios/iphoneos/Cadence-unsigned.ipa
+          path: app/Cadence-unsigned.ipa

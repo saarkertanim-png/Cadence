@@ -57,12 +57,12 @@ Route<T> slideUp<T>(Widget w) => PageRouteBuilder<T>(
         position: Tween(begin: const Offset(0, 1), end: Offset.zero)
             .animate(CurvedAnimation(parent: a, curve: Curves.easeOutCubic, reverseCurve: Curves.easeInCubic)), child: c));
 
+AudioSource _src(Track t) => AudioSource.uri(Uri.file(t.path),
+    tag: MediaItem(id: t.path, title: t.title, artist: t.artist, album: t.album,
+        artUri: t.art == null ? null : Uri.file(t.art!), duration: t.dur > 0 ? Duration(milliseconds: t.dur) : null));
+
 Future<void> playList(List<Track> l, int i) async {
-  final src = ConcatenatingAudioSource(children: [
-    for (final t in l)
-      AudioSource.uri(Uri.file(t.path), tag: MediaItem(id: t.path, title: t.title, artist: t.artist, album: t.album,
-          artUri: t.art == null ? null : Uri.file(t.art!), duration: t.dur > 0 ? Duration(milliseconds: t.dur) : null))
-  ]);
+  final src = ConcatenatingAudioSource(children: [for (final t in l) _src(t)]);
   try {
     await player.setAudioSource(src, initialIndex: i);
     player.play();
@@ -80,6 +80,60 @@ Future<void> restoreEq() async {
     final lg = p.getDouble('loud') ?? 0; await loud.setTargetGain(lg); await loud.setEnabled(lg > 0);
   } catch (_) {}
 }
+
+// ---- queue + state persistence ----
+Future<void> saveState() async {
+  try {
+    final seq = player.sequence;
+    if (seq == null || seq.isEmpty) return;
+    final paths = [for (final x in seq) if (x.tag is MediaItem) (x.tag as MediaItem).id];
+    if (paths.isEmpty) return;
+    final p = await SharedPreferences.getInstance();
+    await p.setStringList('q', paths);
+    await p.setInt('qi', player.currentIndex ?? 0);
+    await p.setInt('qpos', player.position.inMilliseconds);
+  } catch (_) {}
+}
+
+Future<void> restoreState() async {
+  try {
+    final p = await SharedPreferences.getInstance();
+    final q = p.getStringList('q');
+    if (q == null || q.isEmpty) return;
+    final ts = [for (final x in q) if (lib.byPath[x] != null) lib.byPath[x]!];
+    if (ts.isEmpty) return;
+    final qi = p.getInt('qi') ?? 0;
+    final cur = qi >= 0 && qi < q.length ? q[qi] : null;
+    var ix = ts.indexWhere((t) => t.path == cur);
+    if (ix < 0) ix = 0;
+    await player.setAudioSource(ConcatenatingAudioSource(children: [for (final t in ts) _src(t)]),
+        initialIndex: ix, initialPosition: Duration(milliseconds: p.getInt('qpos') ?? 0));
+    restoreEq();
+  } catch (_) {}
+}
+
+Timer? _ct;
+void _countTimer() {
+  _ct?.cancel();
+  final seq = player.sequence, i = player.currentIndex;
+  if (seq == null || i == null || i < 0 || i >= seq.length) return;
+  final tag = seq[i].tag;
+  if (tag is! MediaItem) return;
+  _ct = Timer(const Duration(seconds: 20), () {
+    if (player.playing && player.currentIndex == i) lib.countPlay(tag.id);
+  });
+}
+
+Future<void> addToQueue(Track t, {bool next = false}) async {
+  final s = player.audioSource;
+  if (s is! ConcatenatingAudioSource || s.length == 0) { await playList([t], 0); return; }
+  try {
+    if (next) { await s.insert((player.currentIndex ?? -1) + 1, _src(t)); } else { await s.add(_src(t)); }
+    snack(next ? 'Will play next' : 'Added to queue');
+  } catch (_) { snack('Could not add to queue.'); }
+}
+
+Future<void> playNext(Track t) => addToQueue(t, next: true);
 
 Timer? _sl;
 void sleepIn(int min) {
