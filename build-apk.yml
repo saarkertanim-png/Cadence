@@ -24,16 +24,25 @@ jobs:
           cp "$(find . -path ./app -prune -o -name main.dart -print | head -n1)" app/lib/main.dart
           cp "$(find . -path ./app -prune -o -name library.dart -print | head -n1)" app/lib/library.dart
           cp "$(find . -path ./app -prune -o -name pubspec.yaml -print | head -n1)" app/pubspec.yaml
+          mkdir -p app/assets
+          cp "$(find . -path ./app -prune -o -name cadence_icon.png -print | head -n1)" app/assets/icon.png
           python3 "$(find . -path ./app -prune -o -name patch_native.py -print | head -n1)" app
       - name: Build release APK
         working-directory: app
         run: |
           flutter pub get
-          flutter build apk --release
+          dart run flutter_launcher_icons
+          flutter build apk --release || true
+      - name: Locate APK
+        run: |
+          mkdir -p out
+          find . -name "*.apk" -path "*release*" -not -path "./out/*" -exec cp {} out/Cadence.apk \; -quit
+          ls -la out
+          test -f out/Cadence.apk
       - uses: actions/upload-artifact@v4
         with:
           name: Cadence-android-apk
-          path: app/build/app/outputs/flutter-apk/app-release.apk
+          path: out/Cadence.apk
   ios:
     runs-on: macos-latest
     steps:
@@ -50,11 +59,14 @@ jobs:
           cp "$(find . -path ./app -prune -o -name main.dart -print | head -n1)" app/lib/main.dart
           cp "$(find . -path ./app -prune -o -name library.dart -print | head -n1)" app/lib/library.dart
           cp "$(find . -path ./app -prune -o -name pubspec.yaml -print | head -n1)" app/pubspec.yaml
+          mkdir -p app/assets
+          cp "$(find . -path ./app -prune -o -name cadence_icon.png -print | head -n1)" app/assets/icon.png
           python3 "$(find . -path ./app -prune -o -name patch_native.py -print | head -n1)" app
       - name: Build iOS (unsigned)
         working-directory: app
         run: |
           flutter pub get
+          dart run flutter_launcher_icons
           flutter build ios --config-only --release --no-codesign
           cd ios
           xcodebuild -workspace Runner.xcworkspace -scheme Runner \
