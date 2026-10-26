@@ -18,9 +18,12 @@ jobs:
       - run: npm install
       - name: Prepare web files
         run: |
+          f=$(find . -path ./node_modules -prune -o -type f -iname '*index.html' -print | head -n1)
+          echo "found: [$f]"
+          cp "$f" /tmp/idx.html
           mkdir -p www
-          if [ ! -f www/index.html ]; then cp index.html www/index.html; fi
-          ls -la . www
+          cp /tmp/idx.html www/index.html
+          ls -la www
       - run: |
           npx cap add android
           npx cap sync android
