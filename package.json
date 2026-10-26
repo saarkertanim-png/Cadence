@@ -1,0 +1,11 @@
+{
+  "name": "cadence",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cadence - Deep, Blue and Mist. By TanimSarker.",
+  "dependencies": {
+    "@capacitor/android": "^6.1.0",
+    "@capacitor/cli": "^6.1.0",
+    "@capacitor/core": "^6.1.0"
+  }
+}

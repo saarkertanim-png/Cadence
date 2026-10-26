@@ -1,0 +1,6 @@
+{
+  "appId": "com.tanimsarker.cadence",
+  "appName": "Cadence",
+  "webDir": "www",
+  "android": { "allowMixedContent": false }
+}
