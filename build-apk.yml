@@ -1,0 +1,62 @@
+name: Build Cadence
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Create native projects
+        run: |
+          flutter create --org com.tanimsarker --project-name cadence --platforms=android,ios app
+          rm -rf app/lib app/test
+          cp -r lib app/lib
+          cp pubspec.yaml app/pubspec.yaml
+          python3 tool/patch_native.py app
+      - name: Build release APK
+        working-directory: app
+        run: |
+          flutter pub get
+          flutter build apk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cadence-android-apk
+          path: app/build/app/outputs/flutter-apk/app-release.apk
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Create native projects
+        run: |
+          flutter create --org com.tanimsarker --project-name cadence --platforms=android,ios app
+          rm -rf app/lib app/test
+          cp -r lib app/lib
+          cp pubspec.yaml app/pubspec.yaml
+          python3 tool/patch_native.py app
+      - name: Build iOS (unsigned)
+        working-directory: app
+        run: |
+          flutter pub get
+          flutter build ios --release --no-codesign
+          cd build/ios/iphoneos
+          mkdir Payload
+          cp -r Runner.app Payload/
+          zip -qr Cadence-unsigned.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cadence-ios-unsigned-ipa
+          path: app/build/ios/iphoneos/Cadence-unsigned.ipa

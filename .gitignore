@@ -1,4 +1,3 @@
-node_modules/
-android/
-*.keystore
-local.properties
+app/
+build/
+.dart_tool/
