@@ -26,7 +26,6 @@ jobs:
           cp "$(find . -path ./app -prune -o -name pubspec.yaml -print | head -n1)" app/pubspec.yaml
           mkdir -p app/assets
           cp "$(find . -path ./app -prune -o -name cadence_icon.png -print | head -n1)" app/assets/icon.png
-          cp "$(find . -path ./app -prune -o -name cadence_icon_fg.png -print | head -n1)" app/assets/icon_fg.png
           python3 "$(find . -path ./app -prune -o -name patch_native.py -print | head -n1)" app
       - name: Build release APK
         working-directory: app
@@ -62,7 +61,6 @@ jobs:
           cp "$(find . -path ./app -prune -o -name pubspec.yaml -print | head -n1)" app/pubspec.yaml
           mkdir -p app/assets
           cp "$(find . -path ./app -prune -o -name cadence_icon.png -print | head -n1)" app/assets/icon.png
-          cp "$(find . -path ./app -prune -o -name cadence_icon_fg.png -print | head -n1)" app/assets/icon_fg.png
           python3 "$(find . -path ./app -prune -o -name patch_native.py -print | head -n1)" app
       - name: Build iOS (unsigned)
         working-directory: app
