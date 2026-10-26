@@ -20,9 +20,12 @@ jobs:
         run: |
           flutter create --org com.tanimsarker --project-name cadence --platforms=android,ios app
           rm -rf app/lib app/test
-          cp -r lib app/lib
-          cp pubspec.yaml app/pubspec.yaml
-          python3 tool/patch_native.py app
+          mkdir -p app/lib
+          find . -path ./app -prune -o -type f \( -name main.dart -o -name library.dart -o -name pubspec.yaml -o -name patch_native.py \) -print
+          cp "$(find . -path ./app -prune -o -name main.dart -print | head -n1)" app/lib/main.dart
+          cp "$(find . -path ./app -prune -o -name library.dart -print | head -n1)" app/lib/library.dart
+          cp "$(find . -path ./app -prune -o -name pubspec.yaml -print | head -n1)" app/pubspec.yaml
+          python3 "$(find . -path ./app -prune -o -name patch_native.py -print | head -n1)" app
       - name: Build release APK
         working-directory: app
         run: |
@@ -44,9 +47,11 @@ jobs:
         run: |
           flutter create --org com.tanimsarker --project-name cadence --platforms=android,ios app
           rm -rf app/lib app/test
-          cp -r lib app/lib
-          cp pubspec.yaml app/pubspec.yaml
-          python3 tool/patch_native.py app
+          mkdir -p app/lib
+          cp "$(find . -path ./app -prune -o -name main.dart -print | head -n1)" app/lib/main.dart
+          cp "$(find . -path ./app -prune -o -name library.dart -print | head -n1)" app/lib/library.dart
+          cp "$(find . -path ./app -prune -o -name pubspec.yaml -print | head -n1)" app/pubspec.yaml
+          python3 "$(find . -path ./app -prune -o -name patch_native.py -print | head -n1)" app
       - name: Build iOS (unsigned)
         working-directory: app
         run: |
