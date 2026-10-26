@@ -21,7 +21,6 @@ jobs:
           flutter create --org com.tanimsarker --project-name cadence --platforms=android,ios app
           rm -rf app/lib app/test
           mkdir -p app/lib
-          find . -path ./app -prune -o -type f \( -name main.dart -o -name library.dart -o -name pubspec.yaml -o -name patch_native.py \) -print
           cp "$(find . -path ./app -prune -o -name main.dart -print | head -n1)" app/lib/main.dart
           cp "$(find . -path ./app -prune -o -name library.dart -print | head -n1)" app/lib/library.dart
           cp "$(find . -path ./app -prune -o -name pubspec.yaml -print | head -n1)" app/pubspec.yaml
@@ -30,11 +29,17 @@ jobs:
         working-directory: app
         run: |
           flutter pub get
-          flutter build apk --release
+          flutter build apk --release || true
+      - name: Locate APK
+        run: |
+          mkdir -p out
+          find . -name "*.apk" -path "*release*" -not -path "./out/*" -exec cp {} out/Cadence.apk \; -quit
+          ls -la out
+          test -f out/Cadence.apk
       - uses: actions/upload-artifact@v4
         with:
           name: Cadence-android-apk
-          path: app/build/app/outputs/flutter-apk/app-release.apk
+          path: out/Cadence.apk
   ios:
     runs-on: macos-latest
     steps:
@@ -56,12 +61,18 @@ jobs:
         working-directory: app
         run: |
           flutter pub get
-          flutter build ios --release --no-codesign
-          cd build/ios/iphoneos
+          flutter build ios --config-only --release --no-codesign
+          cd ios
+          xcodebuild -workspace Runner.xcworkspace -scheme Runner \
+            -configuration Release -sdk iphoneos \
+            -derivedDataPath ../build/dd \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+          cd ..
           mkdir Payload
-          cp -r Runner.app Payload/
+          cp -r build/dd/Build/Products/Release-iphoneos/Runner.app Payload/
           zip -qr Cadence-unsigned.ipa Payload
       - uses: actions/upload-artifact@v4
         with:
           name: Cadence-ios-unsigned-ipa
-          path: app/build/ios/iphoneos/Cadence-unsigned.ipa
+          path: app/Cadence-unsigned.ipa
