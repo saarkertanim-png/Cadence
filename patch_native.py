@@ -26,4 +26,33 @@ i = p.rfind('</dict>')
 p = p[:i] + add + p[i:]
 p = re.sub(r'(<key>CFBundleDisplayName</key>\s*<string>)[^<]*', r'\1Cadence', p)
 open(pl, 'w').write(p)
+# Force every Android plugin to compile against SDK 36 (file_picker's dependency needs it)
+import os
+kts = f'{root}/android/build.gradle.kts'
+grv = f'{root}/android/build.gradle'
+KT = """subprojects {
+    afterEvaluate {
+        val ext = extensions.findByName("android")
+        if (ext != null) {
+            for (n in listOf("setCompileSdkVersion", "compileSdkVersion")) {
+                try { ext.javaClass.getMethod(n, Int::class.java).invoke(ext, 36); break } catch (e: Exception) {}
+            }
+        }
+    }
+}
+"""
+GR = """subprojects {
+    afterEvaluate { p ->
+        if (p.hasProperty('android')) { p.android.compileSdkVersion 36 }
+    }
+}
+"""
+if os.path.exists(kts):
+    open(kts, 'w').write(KT + open(kts).read())
+elif os.path.exists(grv):
+    open(grv, 'w').write(GR + open(grv).read())
+else:
+    raise SystemExit('root build.gradle not found')
+print('compileSdk override added')
+
 print('native config patched')
