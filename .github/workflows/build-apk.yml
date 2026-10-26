@@ -16,6 +16,11 @@ jobs:
           distribution: temurin
           java-version: 17
       - run: npm install
+      - name: Prepare web files
+        run: |
+          mkdir -p www
+          if [ ! -f www/index.html ]; then cp index.html www/index.html; fi
+          ls -la . www
       - run: |
           npx cap add android
           npx cap sync android
