@@ -31,7 +31,73 @@ const themes = [
   Th('Rose Mist', Color(0xFFF8EEEE), Color(0xFFE8B4C2), Color(0xFFC0577A), Color(0xFF4A2A33), false),
   Th('Forest Shadow', Color(0xFF0F1F17), Color(0xFF24523A), Color(0xFF7FBF8E), Color(0xFFDCEBE0), true),
 ];
-Th get th => themes[themeIx.value];
+final adaptiveColors = ValueNotifier<bool>(false);
+final artAccent = ValueNotifier<Color?>(null);
+final vizOn = ValueNotifier<bool>(true);
+final seasonsOn = ValueNotifier<bool>(true);
+Th themeAt(int i) {
+  final b = themes[i], a = artAccent.value;
+  if (!adaptiveColors.value || a == null) return b;
+  return Th(b.n, b.bg, Color.lerp(b.bg2, a, .5)!, a, b.tx, b.dark);
+}
+Th get th => themeAt(themeIx.value);
+
+Future<Color?> dominantColor(String path) async {
+  try {
+    final bytes = await File(path).readAsBytes();
+    final codec = await instantiateImageCodec(bytes, targetWidth: 32, targetHeight: 32);
+    final fr = await codec.getNextFrame();
+    final bd = await fr.image.toByteData(format: ImageByteFormat.rawRgba);
+    if (bd == null) return null;
+    double wr = 0, wg = 0, wb = 0, ws = 0;
+    for (int i = 0; i + 3 < bd.lengthInBytes; i += 4) {
+      final r = bd.getUint8(i), g = bd.getUint8(i + 1), b = bd.getUint8(i + 2);
+      final mx = m.max(r, m.max(g, b)), mn = m.min(r, m.min(g, b));
+      final sat = (mx - mn) / 255.0;
+      final w = sat * sat + .02;
+      wr += r * w; wg += g * w; wb += b * w; ws += w;
+    }
+    if (ws == 0) return null;
+    final raw = Color.fromARGB(255, (wr / ws).round(), (wg / ws).round(), (wb / ws).round());
+    final h = HSLColor.fromColor(raw);
+    final dark = themes[themeIx.value].dark;
+    final satc = m.min(.85, m.max(.35, h.saturation));
+    final lit = dark ? m.min(.75, m.max(.6, h.lightness)) : m.min(.42, m.max(.28, h.lightness));
+    return h.withSaturation(satc).withLightness(lit).toColor();
+  } catch (_) { return null; }
+}
+
+Future<void> updateArtAccent() async {
+  if (!adaptiveColors.value) { artAccent.value = null; return; }
+  final seq = player.sequence, i = player.currentIndex;
+  Track? t;
+  if (seq != null && i != null && i >= 0 && i < seq.length) {
+    final tag = seq[i].tag;
+    if (tag is MediaItem) t = lib.byPath[tag.id];
+  }
+  final art = t?.art;
+  if (art == null) { artAccent.value = null; return; }
+  artAccent.value = await dominantColor(art);
+}
+
+Widget _sw(ValueNotifier<bool> n, String key, IconData ic, String title, String sub, [VoidCallback? after]) =>
+    ValueListenableBuilder<bool>(valueListenable: n, builder: (_, on, __) => SwitchListTile(
+        secondary: Icon(ic), title: Text(title), subtitle: Text(sub), value: on,
+        onChanged: (v) async { n.value = v; HapticFeedback.selectionClick(); (await SharedPreferences.getInstance()).setBool(key, v); after?.call(); }));
+
+Color seasonTint() {
+  final mo = DateTime.now().month;
+  if (mo >= 3 && mo <= 5) return const Color(0xFFF4A6C0);
+  if (mo >= 6 && mo <= 8) return const Color(0xFFFFC857);
+  if (mo >= 9 && mo <= 11) return const Color(0xFFE07A3F);
+  return const Color(0xFF8EC9F0);
+}
+String seasonName() {
+  final mo = DateTime.now().month;
+  return mo >= 3 && mo <= 5 ? 'Spring' : mo >= 6 && mo <= 8 ? 'Summer' : mo >= 9 && mo <= 11 ? 'Autumn' : 'Winter';
+}
+Color bloomBase() => seasonsOn.value ? Color.lerp(th.ac, seasonTint(), .35)! : th.ac;
+int rareTier(int n) => n >= 100 ? 2 : n >= 50 ? 1 : 0;
 final sigText = ValueNotifier<String>('TanimSarker');
 final sigFont = ValueNotifier<int>(0);
 final sigSize = ValueNotifier<double>(22);
@@ -51,10 +117,10 @@ Future<void> recentAdd(String path) async {
   recents.value = l;
   (await SharedPreferences.getInstance()).setStringList('recent', l);
 }
-Future<String?> askText(BuildContext c, String title, String init) {
+Future<String?> askText(BuildContext c, String title, String init, {bool number = false}) {
   final tc = TextEditingController(text: init);
   return showDialog<String>(context: c, builder: (d) => AlertDialog(title: Text(title),
-      content: TextField(controller: tc, autofocus: true, maxLength: 30),
+      content: TextField(controller: tc, autofocus: true, maxLength: 30, keyboardType: number ? TextInputType.number : TextInputType.text),
       actions: [TextButton(onPressed: () => Navigator.pop(d), child: const Text('Cancel')),
         FilledButton(onPressed: () => Navigator.pop(d, tc.text), child: const Text('Save'))]));
 }
@@ -82,6 +148,10 @@ Future<void> main() async {
   sigFont.value = sp.getInt('sigFont') ?? 0;
   sigSize.value = sp.getDouble('sigSize') ?? 22;
   recents.value = sp.getStringList('recent') ?? [];
+  adaptiveColors.value = sp.getBool('adaptive') ?? false;
+  vizOn.value = sp.getBool('viz') ?? true;
+  seasonsOn.value = sp.getBool('seasons') ?? true;
+  player.sequenceStateStream.listen((_) => updateArtAccent());
   applyAutoTheme();
   Timer.periodic(const Duration(minutes: 10), (_) => applyAutoTheme());
   player.playbackEventStream.listen((_) {}, onError: (e, st) => snack('This file cannot be played (missing or unsupported).'));
@@ -159,7 +229,7 @@ void _diagOnce() {
     try {
       final n = await Permission.notification.status;
       final b = await Permission.ignoreBatteryOptimizations.isGranted;
-      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 8');
+      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 9');
     } catch (_) {}
   });
 }
@@ -264,10 +334,10 @@ void sleepIn(int min) {
 class CadenceApp extends StatelessWidget {
   const CadenceApp({super.key});
   @override
-  Widget build(BuildContext context) => ValueListenableBuilder<int>(
-      valueListenable: themeIx,
-      builder: (_, i, __) {
-        final t = themes[i];
+  Widget build(BuildContext context) => ListenableBuilder(
+      listenable: Listenable.merge([themeIx, artAccent, adaptiveColors]),
+      builder: (_, __) {
+        final t = th;
         final cs = ColorScheme.fromSeed(seedColor: t.ac, brightness: t.dark ? Brightness.dark : Brightness.light)
             .copyWith(primary: t.ac, onSurface: t.tx, surface: t.bg);
         final base = ThemeData(useMaterial3: true, colorScheme: cs);
@@ -317,7 +387,7 @@ class _SplashS extends State<Splash> with SingleTickerProviderStateMixin {
           const SizedBox(height: 8),
           Text('DEEP, BLUE AND MIST', style: TextStyle(fontSize: 12, letterSpacing: 5, color: th.tx.withOpacity(.6))),
           const SizedBox(height: 10),
-          Text('build 8', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
+          Text('build 9', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
           const SizedBox(height: 26),
           SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: th.ac)),
         ])))));
@@ -554,6 +624,37 @@ class _LibS extends State<LibraryPage> {
   }
 }
 
+class VizBars extends StatefulWidget { const VizBars({super.key}); @override State<VizBars> createState() => _VB(); }
+class _VB extends State<VizBars> with SingleTickerProviderStateMixin {
+  late final AnimationController c = AnimationController(vsync: this, duration: const Duration(seconds: 20))..repeat();
+  double amp = 0;
+  @override
+  void dispose() { c.dispose(); super.dispose(); }
+  @override
+  Widget build(BuildContext ctx) => SizedBox(height: 40, width: double.infinity, child: AnimatedBuilder(animation: c, builder: (_, __) {
+        amp += ((player.playing ? 1.0 : .08) - amp) * .08;
+        return CustomPaint(painter: _VizP(c.value * 20, amp, th.ac));
+      }));
+}
+class _VizP extends CustomPainter {
+  final double t, amp; final Color col;
+  _VizP(this.t, this.amp, this.col);
+  @override
+  void paint(Canvas cv, Size sz) {
+    const n = 32;
+    final w = sz.width / n;
+    final p = Paint()..color = col.withOpacity(.75)..strokeCap = StrokeCap.round..strokeWidth = w * .5;
+    for (int i = 0; i < n; i++) {
+      final v = (m.sin(t * 3.1 + i * .55) + m.sin(t * 5.3 + i * 1.3) * .6 + m.sin(t * 1.7 + i * .21) * .4) / 2;
+      final hh = m.max(3.0, (4 + v.abs() * (sz.height - 6)) * amp);
+      final x = i * w + w / 2;
+      cv.drawLine(Offset(x, sz.height / 2 - hh / 2), Offset(x, sz.height / 2 + hh / 2), p);
+    }
+  }
+  @override
+  bool shouldRepaint(covariant _VizP o) => true;
+}
+
 class WavePainter extends CustomPainter {
   final double p, ph, amp; final Color ac, ac2, tr; final bool drag;
   WavePainter(this.p, this.ph, this.amp, this.ac, this.ac2, this.tr, this.drag);
@@ -668,6 +769,8 @@ class NowPlaying extends StatelessWidget {
                   decoration: BoxDecoration(border: Border.all(color: th.tx.withOpacity(.4)), borderRadius: BorderRadius.circular(20)),
                   child: Text(t.badge, style: const TextStyle(fontSize: 12)))),
               const Spacer(),
+              ValueListenableBuilder<bool>(valueListenable: vizOn, builder: (_, on, __) => on
+                  ? const Padding(padding: EdgeInsets.only(bottom: 8), child: VizBars()) : const SizedBox.shrink()),
               const WaveSeek(),
               Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
                 StreamBuilder<bool>(stream: player.shuffleModeEnabledStream, builder: (_, s) => IconButton(
@@ -700,7 +803,13 @@ void moreSheet(BuildContext c, Track t) => _sheet(c, Column(mainAxisSize: MainAx
       ListTile(leading: const Icon(Icons.playlist_add_rounded), title: const Text('Add to playlist'), onTap: () { Navigator.pop(c); pickPlaylist(c, t); }),
       ListTile(leading: const Icon(Icons.bedtime_outlined), title: const Text('Sleep timer'), onTap: () {
         Navigator.pop(c);
-        _sheet(c, Wrap(spacing: 8, children: [for (final v in [0, -1, 5, 15, 30, 45, 60]) ActionChip(label: Text(v == 0 ? 'Off' : v == -1 ? 'End of song' : '$v min'), onPressed: () { sleepIn(v); Navigator.pop(c); })]));
+        _sheet(c, Wrap(spacing: 8, children: [for (final v in [0, -1, 5, 15, 30, 45, 60]) ActionChip(label: Text(v == 0 ? 'Off' : v == -1 ? 'End of song' : '$v min'), onPressed: () { sleepIn(v); Navigator.pop(c); }),
+        ActionChip(avatar: const Icon(Icons.edit_rounded, size: 16), label: const Text('Custom'), onPressed: () async {
+          Navigator.pop(c);
+          final r = await askText(c, 'Sleep after how many minutes?', '20', number: true);
+          final n = int.tryParse((r ?? '').trim());
+          if (n != null && n > 0 && n <= 1440) { sleepIn(n); } else if (r != null) { snack('Enter minutes from 1 to 1440'); }
+        })]));
       }),
       ListTile(leading: const Icon(Icons.speed_rounded), title: const Text('Playback speed'), onTap: () {
         Navigator.pop(c);
@@ -750,8 +859,8 @@ Future<String?> askName(BuildContext c, String init) {
 }
 
 class BloomPainter extends CustomPainter {
-  final int seed; final double growth, ph; final Color base;
-  BloomPainter(this.seed, this.growth, this.ph, this.base);
+  final int seed, tier; final double growth, ph; final Color base;
+  BloomPainter(this.seed, this.growth, this.ph, this.base, {this.tier = 0});
   @override
   void paint(Canvas c, Size s) {
     final ctr = s.center(Offset.zero), r = s.shortestSide / 2 * growth * (1 + .03 * m.sin(ph)), hsl = HSLColor.fromColor(base), n = 6 + seed % 6;
@@ -768,13 +877,20 @@ class BloomPainter extends CustomPainter {
         c.restore();
       }
     }
+    if (tier >= 1) c.drawCircle(ctr, r * 1.04, Paint()..style = PaintingStyle.stroke..strokeWidth = 2..color = const Color(0xFFFFD27A).withOpacity(.85));
+    if (tier >= 2) {
+      for (int k = 0; k < 14; k++) {
+        final a = k * 2 * m.pi / 14 + ph * .1, d = r * (1.12 + .06 * m.sin(ph * 2 + k));
+        c.drawCircle(ctr + Offset(m.cos(a), m.sin(a)) * d, 2.2, Paint()..color = Colors.white.withOpacity(.9));
+      }
+    }
     c.drawCircle(ctr, r * .09, Paint()..color = Colors.white.withOpacity(.85));
   }
   @override
-  bool shouldRepaint(covariant BloomPainter o) => o.ph != ph || o.growth != growth || o.seed != seed || o.base != base;
+  bool shouldRepaint(covariant BloomPainter o) => o.ph != ph || o.growth != growth || o.seed != seed || o.base != base || o.tier != tier;
 }
 
-String bloomStage(int n) => n >= 20 ? 'Full bloom' : n >= 10 ? 'Bloom' : n >= 5 ? 'Bud' : n >= 1 ? 'Sprout' : 'Seed';
+String bloomStage(int n) => n >= 100 ? 'Crystal bloom' : n >= 50 ? 'Golden bloom' : n >= 20 ? 'Full bloom' : n >= 10 ? 'Bloom' : n >= 5 ? 'Bud' : n >= 1 ? 'Sprout' : 'Seed';
 
 // The big Now Playing card: real album art, or a unique flower generated from the song.
 // Every song's flower grows the more you listen. Tap to flip between art and bloom.
@@ -799,7 +915,7 @@ class _BA extends State<BigArt> with SingleTickerProviderStateMixin {
                       Container(decoration: BoxDecoration(gradient: RadialGradient(colors: [th.bg, Color.lerp(th.bg, th.bg2, .8)!]))),
                       AnimatedBuilder(animation: c, builder: (_, __) {
                         if (player.playing) ph += .04;
-                        return CustomPaint(size: Size(s, s), painter: BloomPainter(seedOf(t?.path ?? 'cadence'), .55 + .4 * m.min(1.0, plays / 20), ph, th.ac));
+                        return CustomPaint(size: Size(s, s), painter: BloomPainter(seedOf(t?.path ?? 'cadence'), .55 + .4 * m.min(1.0, plays / 20), ph, bloomBase(), tier: rareTier(plays)));
                       }),
                       Positioned(left: 0, right: 0, bottom: 14, child: Center(child: Text('${bloomStage(plays)} · $plays plays',
                           style: TextStyle(fontSize: 12, letterSpacing: 1.5, color: th.tx.withOpacity(.7))))),
@@ -818,10 +934,11 @@ class GardenPage extends StatelessWidget {
       final es = lib.plays.entries.where((e) => lib.byPath[e.key] != null).toList()..sort((a, b) => b.value.compareTo(a.value));
       final total = es.fold<int>(0, (a, e) => a + e.value);
       final tracks = [for (final e in es) lib.byPath[e.key]!];
+      final seasonTxt = seasonsOn.value ? ' · ${seasonName()}' : '';
       return CustomScrollView(slivers: [
         SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(20, 8, 20, 12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           const Text('Garden', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w300)),
-          Text(es.isEmpty ? 'Every song you listen to grows into its own flower here.' : '${es.length} blooms · $total plays',
+          Text(es.isEmpty ? 'Every song you listen to grows into its own flower here.' : '${es.length} blooms · $total plays$seasonTxt',
               style: TextStyle(color: th.tx.withOpacity(.65))),
         ]))),
         if (es.isEmpty) SliverFillRemaining(hasScrollBody: false, child: Center(child: Icon(Icons.local_florist_outlined, size: 72, color: th.ac)))
@@ -833,7 +950,7 @@ class GardenPage extends StatelessWidget {
               return InkWell(borderRadius: BorderRadius.circular(22), onTap: () => playList(tracks, i), child: Container(
                   decoration: BoxDecoration(color: th.bg.withOpacity(.5), borderRadius: BorderRadius.circular(22), border: Border.all(color: Colors.white54)),
                   child: Column(children: [
-                    Expanded(child: RepaintBoundary(child: CustomPaint(size: Size.infinite, painter: BloomPainter(seedOf(t.path), .5 + .45 * m.min(1.0, n / 20), 0, th.ac)))),
+                    Expanded(child: RepaintBoundary(child: CustomPaint(size: Size.infinite, painter: BloomPainter(seedOf(t.path), .5 + .45 * m.min(1.0, n / 20), 0, bloomBase(), tier: rareTier(n))))),
                     Padding(padding: const EdgeInsets.fromLTRB(10, 0, 10, 10), child: Column(children: [
                       Text(t.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600)),
                       Text('${bloomStage(n)} · $n plays', style: const TextStyle(fontSize: 12))])),
@@ -938,6 +1055,9 @@ class SettingsPage extends StatelessWidget {
           secondary: const Icon(Icons.draw_outlined), title: const Text('Show signature'),
           subtitle: const Text('Your name in script on the player'), value: on,
           onChanged: (v) async { showSig.value = v; HapticFeedback.selectionClick(); (await SharedPreferences.getInstance()).setBool('sig', v); })),
+      _sw(adaptiveColors, 'adaptive', Icons.palette_outlined, 'Colors from album art', 'The accent color follows the cover of the song playing', updateArtAccent),
+      _sw(vizOn, 'viz', Icons.equalizer_rounded, 'Visualizer', 'Moving bars on the player while music plays'),
+      _sw(seasonsOn, 'seasons', Icons.eco_outlined, 'Garden seasons', 'Your flowers take on the colors of the season'),
       ListenableBuilder(listenable: Listenable.merge([sigText, sigFont, sigSize]), builder: (ctx, _) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         ListTile(leading: const Icon(Icons.edit_outlined), title: const Text('Signature text'), subtitle: Text(sigText.value),
             onTap: () async {
