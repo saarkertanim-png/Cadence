@@ -7,7 +7,7 @@ perms = ''.join(f'<uses-permission android:name="android.permission.{p}"/>' for 
   '<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>'
 s = s.replace('<application', perms + '<application', 1)
 s = re.sub(r'android:label="[^"]*"', 'android:label="Cadence"', s, count=1)
-svc = ('<service android:name="com.ryanheise.audioservice.AudioService" android:foregroundServiceType="mediaPlayback" android:exported="true">'
+svc = ('<service android:name="com.ryanheise.audioservice.AudioService" android:foregroundServiceType="mediaPlayback" android:stopWithTask="false" android:exported="true">'
   '<intent-filter><action android:name="android.media.browse.MediaBrowserService"/></intent-filter></service>'
   '<receiver android:name="com.ryanheise.audioservice.MediaButtonReceiver" android:exported="true">'
   '<intent-filter><action android:name="android.intent.action.MEDIA_BUTTON"/></intent-filter></receiver>')
@@ -71,4 +71,16 @@ for dn in ['mipmap-mdpi', 'mipmap-hdpi', 'mipmap-xhdpi', 'mipmap-xxhdpi', 'mipma
     open(f'{res}/{dn}/ic_launcher.png', 'wb').write(png)
 print('icon written')
 
+# Turn off R8 shrinking in release: it can strip the audio service classes and break background play
+for gf in [f'{root}/android/app/build.gradle.kts', f'{root}/android/app/build.gradle']:
+    if os.path.exists(gf):
+        g = open(gf).read()
+        if gf.endswith('.kts'):
+            g2 = g.replace('signingConfig = signingConfigs.getByName("debug")',
+                           'signingConfig = signingConfigs.getByName("debug")\n            isMinifyEnabled = false\n            isShrinkResources = false', 1)
+        else:
+            g2 = g.replace('signingConfig signingConfigs.debug',
+                           'signingConfig signingConfigs.debug\n            minifyEnabled false\n            shrinkResources false', 1)
+        open(gf, 'w').write(g2)
+        print('minify disabled' if g2 != g else 'WARNING: could not patch minify')
 print('native config patched')

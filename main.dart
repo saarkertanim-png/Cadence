@@ -111,6 +111,19 @@ Future<void> ensureNotif() async {
   } catch (_) {}
 }
 
+bool _diagShown = false;
+void _diagOnce() {
+  if (_diagShown || !Platform.isAndroid) return;
+  _diagShown = true;
+  Future.delayed(const Duration(seconds: 3), () async {
+    try {
+      final n = await Permission.notification.status;
+      final b = await Permission.ignoreBatteryOptimizations.isGranted;
+      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 6');
+    } catch (_) {}
+  });
+}
+
 Future<void> playList(List<Track> l, int i) async {
   await ensureNotif();
   final src = ConcatenatingAudioSource(children: [for (final t in l) _src(t)]);
@@ -118,6 +131,7 @@ Future<void> playList(List<Track> l, int i) async {
     await player.setAudioSource(src, initialIndex: i);
     player.play();
     restoreEq();
+    _diagOnce();
   } catch (e) { snack('Cannot play this file. It may be missing or unsupported.'); }
 }
 
