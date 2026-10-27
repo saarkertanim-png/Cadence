@@ -32,6 +32,32 @@ const themes = [
   Th('Forest Shadow', Color(0xFF0F1F17), Color(0xFF24523A), Color(0xFF7FBF8E), Color(0xFFDCEBE0), true),
 ];
 Th get th => themes[themeIx.value];
+final sigText = ValueNotifier<String>('TanimSarker');
+final sigFont = ValueNotifier<int>(0);
+final sigSize = ValueNotifier<double>(22);
+const sigFontNames = ['Great Vibes', 'Dancing Script', 'Pacifico', 'Caveat', 'Satisfy'];
+TextStyle sigStyle(int i, double sz, Color c) {
+  switch (i) {
+    case 1: return GoogleFonts.dancingScript(fontSize: sz, color: c);
+    case 2: return GoogleFonts.pacifico(fontSize: sz, color: c);
+    case 3: return GoogleFonts.caveat(fontSize: sz, color: c);
+    case 4: return GoogleFonts.satisfy(fontSize: sz, color: c);
+    default: return GoogleFonts.greatVibes(fontSize: sz, color: c);
+  }
+}
+final recents = ValueNotifier<List<String>>([]);
+Future<void> recentAdd(String path) async {
+  final l = [path, ...recents.value.where((x) => x != path)].take(40).toList();
+  recents.value = l;
+  (await SharedPreferences.getInstance()).setStringList('recent', l);
+}
+Future<String?> askText(BuildContext c, String title, String init) {
+  final tc = TextEditingController(text: init);
+  return showDialog<String>(context: c, builder: (d) => AlertDialog(title: Text(title),
+      content: TextField(controller: tc, autofocus: true, maxLength: 30),
+      actions: [TextButton(onPressed: () => Navigator.pop(d), child: const Text('Cancel')),
+        FilledButton(onPressed: () => Navigator.pop(d, tc.text), child: const Text('Save'))]));
+}
 final autoTheme = ValueNotifier<bool>(false);
 void applyAutoTheme() {
   if (!autoTheme.value) return;
@@ -52,6 +78,10 @@ Future<void> main() async {
   themeIx.value = sp.getInt('theme') ?? 0;
   showSig.value = sp.getBool('sig') ?? true;
   autoTheme.value = sp.getBool('auto') ?? false;
+  sigText.value = sp.getString('sigText') ?? 'TanimSarker';
+  sigFont.value = sp.getInt('sigFont') ?? 0;
+  sigSize.value = sp.getDouble('sigSize') ?? 22;
+  recents.value = sp.getStringList('recent') ?? [];
   applyAutoTheme();
   Timer.periodic(const Duration(minutes: 10), (_) => applyAutoTheme());
   player.playbackEventStream.listen((_) {}, onError: (e, st) => snack('This file cannot be played (missing or unsupported).'));
@@ -129,7 +159,7 @@ void _diagOnce() {
     try {
       final n = await Permission.notification.status;
       final b = await Permission.ignoreBatteryOptimizations.isGranted;
-      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 7');
+      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 8');
     } catch (_) {}
   });
 }
@@ -195,7 +225,7 @@ void _countTimer() {
   final tag = seq[i].tag;
   if (tag is! MediaItem) return;
   _ct = Timer(const Duration(seconds: 20), () {
-    if (player.playing && player.currentIndex == i) lib.countPlay(tag.id);
+    if (player.playing && player.currentIndex == i) { lib.countPlay(tag.id); recentAdd(tag.id); }
   });
 }
 
@@ -287,7 +317,7 @@ class _SplashS extends State<Splash> with SingleTickerProviderStateMixin {
           const SizedBox(height: 8),
           Text('DEEP, BLUE AND MIST', style: TextStyle(fontSize: 12, letterSpacing: 5, color: th.tx.withOpacity(.6))),
           const SizedBox(height: 10),
-          Text('build 7', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
+          Text('build 8', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
           const SizedBox(height: 26),
           SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: th.ac)),
         ])))));
@@ -408,12 +438,29 @@ class _LibS extends State<LibraryPage> {
     l.sort((a, b) => sort == 'size' ? b.size.compareTo(a.size) : sort == 'added' ? b.added.compareTo(a.added) : k(a).compareTo(k(b)));
     return l;
   }
+  Widget songOfDay(BuildContext c) {
+    if (lib.tracks.isEmpty) return const SizedBox.shrink();
+    final n = DateTime.now();
+    final t = lib.tracks[seedOf('${n.year}-${n.month}-${n.day}') % lib.tracks.length];
+    return ListTile(leading: Art(t, 48, 12),
+        title: Text(t.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+        subtitle: Text('Song of the day · ${t.artist}', maxLines: 1, overflow: TextOverflow.ellipsis),
+        trailing: Icon(Icons.wb_sunny_rounded, color: th.ac), onTap: () => playList([t], 0));
+  }
   Widget playlistsBody(BuildContext c) {
     final most = (lib.plays.entries.where((e) => lib.byPath[e.key] != null).toList()..sort((a, b) => b.value.compareTo(a.value)))
         .take(25).map((e) => lib.byPath[e.key]!).toList();
     return ListView(key: const ValueKey('pl'), children: [
       ListTile(leading: CircleAvatar(backgroundColor: th.ac, child: const Icon(Icons.add, color: Colors.white)), title: const Text('New playlist'),
           onTap: () async { final n = await askName(c, ''); if (n != null) lib.newPlaylist(n); }),
+      songOfDay(c),
+      ValueListenableBuilder<List<String>>(valueListenable: recents, builder: (_, r, __) {
+        final rt = [for (final p in r) if (lib.byPath[p] != null) lib.byPath[p]!];
+        if (rt.isEmpty) return const SizedBox.shrink();
+        return ExpansionTile(leading: const Icon(Icons.history_rounded), title: const Text('Recently played'),
+            subtitle: Text('${rt.length} songs'), shape: const Border(), collapsedShape: const Border(),
+            children: [for (int i = 0; i < rt.length; i++) tile(rt, i, null)]);
+      }),
       if (most.isNotEmpty) ExpansionTile(leading: const Icon(Icons.local_fire_department_rounded), title: const Text('Most played'),
           subtitle: Text('${most.length} songs'), shape: const Border(), collapsedShape: const Border(),
           children: [for (int i = 0; i < most.length; i++) tile(most, i, null)]),
@@ -637,7 +684,7 @@ class NowPlaying extends StatelessWidget {
               ]),
               ValueListenableBuilder<bool>(valueListenable: showSig, builder: (_, on, __) => on
                   ? Padding(padding: const EdgeInsets.only(top: 2, bottom: 2),
-                      child: Text('TanimSarker', style: GoogleFonts.greatVibes(fontSize: 22, color: th.tx.withOpacity(.55))))
+                      child: ListenableBuilder(listenable: Listenable.merge([sigText, sigFont, sigSize]), builder: (_, __) => Text(sigText.value, textAlign: TextAlign.center, maxLines: 1, overflow: TextOverflow.ellipsis, style: sigStyle(sigFont.value, sigSize.value, th.tx.withOpacity(.55)))))
                   : const SizedBox(height: 10)),
             ]))),
           ])));
@@ -889,8 +936,27 @@ class SettingsPage extends StatelessWidget {
           onChanged: (v) async { autoTheme.value = v; (await SharedPreferences.getInstance()).setBool('auto', v); applyAutoTheme(); })),
       ValueListenableBuilder<bool>(valueListenable: showSig, builder: (_, on, __) => SwitchListTile(
           secondary: const Icon(Icons.draw_outlined), title: const Text('Show signature'),
-          subtitle: const Text('The small "TanimSarker" script on the player'), value: on,
+          subtitle: const Text('Your name in script on the player'), value: on,
           onChanged: (v) async { showSig.value = v; HapticFeedback.selectionClick(); (await SharedPreferences.getInstance()).setBool('sig', v); })),
+      ListenableBuilder(listenable: Listenable.merge([sigText, sigFont, sigSize]), builder: (ctx, _) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        ListTile(leading: const Icon(Icons.edit_outlined), title: const Text('Signature text'), subtitle: Text(sigText.value),
+            onTap: () async {
+              final n = await askText(ctx, 'Signature text', sigText.value);
+              if (n != null && n.trim().isNotEmpty) { sigText.value = n.trim(); (await SharedPreferences.getInstance()).setString('sigText', n.trim()); }
+            }),
+        Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: Wrap(spacing: 8, runSpacing: 6, children: [
+          for (int i = 0; i < sigFontNames.length; i++) ChoiceChip(
+              label: Text(sigFontNames[i], style: sigStyle(i, 16, th.tx)), selected: sigFont.value == i,
+              onSelected: (_) async { sigFont.value = i; (await SharedPreferences.getInstance()).setInt('sigFont', i); })])),
+        Padding(padding: const EdgeInsets.fromLTRB(16, 8, 16, 0), child: Row(children: [
+          const Text('Size'),
+          Expanded(child: Slider(min: 14, max: 40, value: sigSize.value, onChanged: (v) => sigSize.value = v,
+              onChangeEnd: (v) async { (await SharedPreferences.getInstance()).setDouble('sigSize', v); }))])),
+        Center(child: Padding(padding: const EdgeInsets.only(bottom: 8),
+            child: Text(sigText.value, style: sigStyle(sigFont.value, sigSize.value, th.tx.withOpacity(.7))))),
+      ])),
+      ListTile(leading: const Icon(Icons.insights_rounded), title: const Text('Listening stats'),
+          onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const StatsPage()))),
       ListTile(leading: const Icon(Icons.refresh_rounded), title: const Text('Rescan device for music'), onTap: lib.scan),
       if (!Platform.isAndroid) ListTile(leading: const Icon(Icons.add_rounded), title: const Text('Add music files'), onTap: lib.importFiles),
       const Divider(),
@@ -899,5 +965,47 @@ class SettingsPage extends StatelessWidget {
           'Android scans your storage automatically. iOS does not allow that, so use Add music files or put files in the Cadence folder in the Files app. The equalizer works on Android only.',
           style: TextStyle(fontSize: 12, color: th.tx.withOpacity(.6)))),
     ]));
+  }
+}
+
+class StatsPage extends StatelessWidget {
+  const StatsPage({super.key});
+  @override
+  Widget build(BuildContext c) {
+    Theme.of(c);
+    final played = lib.plays.entries.where((e) => lib.byPath[e.key] != null).toList()..sort((a, b) => b.value.compareTo(a.value));
+    final total = played.fold<int>(0, (a, e) => a + e.value);
+    final ms = played.fold<int>(0, (a, e) => a + e.value * lib.byPath[e.key]!.dur);
+    final byArtist = <String, int>{};
+    for (final e in played) { final a = lib.byPath[e.key]!.artist; byArtist[a] = (byArtist[a] ?? 0) + e.value; }
+    final artists = byArtist.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+    final time = ms < 3600000 ? '${(ms / 60000).round()} min' : '${(ms / 3600000).toStringAsFixed(1)} h';
+    Widget card(String k, String v) => Expanded(child: Container(
+        margin: const EdgeInsets.all(4), padding: const EdgeInsets.symmetric(vertical: 16),
+        decoration: BoxDecoration(color: th.ac.withOpacity(.12), borderRadius: BorderRadius.circular(18)),
+        child: Column(children: [
+          Text(v, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 4),
+          Text(k, style: TextStyle(fontSize: 12, color: th.tx.withOpacity(.65)))])));
+    return Scaffold(
+      appBar: AppBar(title: const Text('Listening stats')),
+      body: played.isEmpty
+          ? const Center(child: Padding(padding: EdgeInsets.all(32), child: Text('Play some songs and your stats will show up here.', textAlign: TextAlign.center)))
+          : ListView(padding: const EdgeInsets.all(16), children: [
+              Row(children: [card('plays', '$total'), card('songs', '${played.length}'), card('listened', time)]),
+              const SizedBox(height: 18),
+              const Text('Top songs', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+              for (final e in played.take(10)) ListTile(
+                  leading: Art(lib.byPath[e.key]!, 44, 10),
+                  title: Text(lib.byPath[e.key]!.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  subtitle: Text(lib.byPath[e.key]!.artist, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  trailing: Text('${e.value}x')),
+              const SizedBox(height: 12),
+              const Text('Top artists', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+              for (final e in artists.take(8)) ListTile(
+                  leading: const Icon(Icons.person_outline_rounded), title: Text(e.key, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  trailing: Text('${e.value}x')),
+            ]),
+    );
   }
 }
