@@ -51,9 +51,17 @@ Future<void> main() async {
   runApp(const CadenceApp());
 }
 
-Future<void> askBgPermissions() async {
-  if (!Platform.isAndroid) return;
+bool permsBusy = false;
+// Asks one at a time, in order: music -> notifications -> battery -> appear on top. Then scans.
+Future<void> startupPerms() async {
+  if (!Platform.isAndroid) { lib.scan(); return; }
+  permsBusy = true;
   try {
+    var a = await Permission.audio.status;
+    if (!a.isGranted) a = await Permission.audio.request();
+    if (!a.isGranted) await Permission.storage.request();
+    await Future.delayed(const Duration(milliseconds: 400));
+
     var n = await Permission.notification.status;
     if (!n.isGranted) n = await Permission.notification.request();
     if (!n.isGranted) {
@@ -62,10 +70,19 @@ Future<void> askBgPermissions() async {
           content: const Text('Allow notifications to control music from the lock screen and notification panel.'),
           action: SnackBarAction(label: 'Settings', onPressed: () { openAppSettings(); })));
     }
+    await Future.delayed(const Duration(milliseconds: 400));
+
     if (!await Permission.ignoreBatteryOptimizations.isGranted) {
       await Permission.ignoreBatteryOptimizations.request();
     }
+    await Future.delayed(const Duration(milliseconds: 400));
+
+    if (!await Permission.systemAlertWindow.isGranted) {
+      await Permission.systemAlertWindow.request();
+    }
   } catch (_) {}
+  permsBusy = false;
+  lib.scan();
 }
 
 Route<T> slideUp<T>(Widget w) => PageRouteBuilder<T>(
@@ -79,7 +96,23 @@ AudioSource _src(Track t) => AudioSource.uri(Uri.file(t.path),
     tag: MediaItem(id: t.path, title: t.title, artist: t.artist, album: t.album,
         artUri: t.art == null ? null : Uri.file(t.art!), duration: t.dur > 0 ? Duration(milliseconds: t.dur) : null));
 
+Future<void> ensureNotif() async {
+  if (!Platform.isAndroid || permsBusy) return;
+  try {
+    var n = await Permission.notification.status;
+    if (n.isGranted) return;
+    n = await Permission.notification.request();
+    if (!n.isGranted) {
+      msgKey.currentState?..hideCurrentSnackBar()..showSnackBar(SnackBar(
+          duration: const Duration(seconds: 15),
+          content: const Text('Notifications are off, so lock screen and notification panel controls cannot show.'),
+          action: SnackBarAction(label: 'Turn on', onPressed: () { openAppSettings(); })));
+    }
+  } catch (_) {}
+}
+
 Future<void> playList(List<Track> l, int i) async {
+  await ensureNotif();
   final src = ConcatenatingAudioSource(children: [for (final t in l) _src(t)]);
   try {
     await player.setAudioSource(src, initialIndex: i);
@@ -205,7 +238,7 @@ class _SplashS extends State<Splash> with SingleTickerProviderStateMixin {
       Navigator.pushReplacement(context, PageRouteBuilder(transitionDuration: const Duration(milliseconds: 700),
           pageBuilder: (_, __, ___) => const Home(),
           transitionsBuilder: (_, a, __, ch) => FadeTransition(opacity: a, child: ch)));
-      lib.scan();
+      Future.delayed(const Duration(milliseconds: 900), startupPerms);
     });
   }
   @override
@@ -219,7 +252,9 @@ class _SplashS extends State<Splash> with SingleTickerProviderStateMixin {
           const Text('Cadence', style: TextStyle(fontSize: 54, fontWeight: FontWeight.w200, letterSpacing: 4)),
           const SizedBox(height: 8),
           Text('DEEP, BLUE AND MIST', style: TextStyle(fontSize: 12, letterSpacing: 5, color: th.tx.withOpacity(.6))),
-          const SizedBox(height: 36),
+          const SizedBox(height: 10),
+          Text('build 6', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
+          const SizedBox(height: 26),
           SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: th.ac)),
         ])))));
   }
@@ -248,14 +283,13 @@ class _HomeS extends State<Home> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    WidgetsBinding.instance.addPostFrameCallback((_) => Future.delayed(const Duration(milliseconds: 800), askBgPermissions));
   }
   @override
   void dispose() { WidgetsBinding.instance.removeObserver(this); super.dispose(); }
   @override
   void didChangeAppLifecycleState(AppLifecycleState s) {
     if (s == AppLifecycleState.paused) saveState();
-    if (s == AppLifecycleState.resumed) lib.scan();
+    if (s == AppLifecycleState.resumed && !permsBusy) lib.scan();
   }
   @override
   Widget build(BuildContext context) {
