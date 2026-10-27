@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert' show jsonDecode, jsonEncode, utf8;
 import 'dart:io';
 import 'dart:math' as m;
 import 'dart:ui';
@@ -9,6 +10,7 @@ import 'package:just_audio_background/just_audio_background.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:file_picker/file_picker.dart' show FilePicker, FileType;
 import 'library.dart';
 
 final eq = AndroidEqualizer(), loud = AndroidLoudnessEnhancer();
@@ -35,6 +37,67 @@ final adaptiveColors = ValueNotifier<bool>(false);
 final artAccent = ValueNotifier<Color?>(null);
 final vizOn = ValueNotifier<bool>(true);
 final seasonsOn = ValueNotifier<bool>(true);
+final gardenCols = ValueNotifier<int>(3);
+String folderName(String path) {
+  final parts = path.replaceAll('\\', '/').split('/');
+  if (parts.length >= 3) return '${parts[parts.length - 3]}/${parts[parts.length - 2]}';
+  if (parts.length == 2) return parts[0].isEmpty ? '/' : parts[0];
+  return 'Unknown';
+}
+
+Future<void> backupToClipboard() async {
+  try {
+    final data = {
+      'app': 'cadence', 'v': 1,
+      'playlists': lib.playlists,
+      'favs': lib.favs.toList(),
+      'plays': lib.plays,
+      'sig': {'text': sigText.value, 'font': sigFont.value, 'size': sigSize.value},
+    };
+    await Clipboard.setData(ClipboardData(text: jsonEncode(data)));
+    snack('Backup copied. Paste it into a note or message to keep it safe.');
+  } catch (_) { snack('Could not create the backup.'); }
+}
+
+Future<void> restoreFromClipboard() async {
+  try {
+    final d = await Clipboard.getData('text/plain');
+    final j = jsonDecode(d?.text ?? '');
+    if (j is! Map || j['app'] != 'cadence') { snack('The clipboard does not hold a Cadence backup. Copy it first.'); return; }
+    var pl = 0, fv = 0;
+    final pls = j['playlists'];
+    if (pls is Map) {
+      for (final e in pls.entries) {
+        final name = e.key as String;
+        await lib.newPlaylist(name);
+        for (final p in (e.value as List)) { await lib.addTo(name, p as String); }
+        pl++;
+      }
+    }
+    final favs = j['favs'];
+    if (favs is List) {
+      for (final p in favs) {
+        final t = lib.byPath[p as String];
+        if (t != null && !lib.favs.contains(p)) { await lib.toggleFav(t); fv++; }
+      }
+    }
+    final pp = j['plays'];
+    if (pp is Map) {
+      for (final e in pp.entries) {
+        final path = e.key as String, n = (e.value as num).toInt();
+        if (n > (lib.plays[path] ?? 0)) { lib.plays[path] = n - 1; await lib.countPlay(path); }
+      }
+    }
+    final sg = j['sig'];
+    if (sg is Map) {
+      final sp = await SharedPreferences.getInstance();
+      if (sg['text'] is String && (sg['text'] as String).trim().isNotEmpty) { sigText.value = sg['text'] as String; await sp.setString('sigText', sigText.value); }
+      if (sg['font'] is int) { sigFont.value = sg['font'] as int; await sp.setInt('sigFont', sigFont.value); }
+      if (sg['size'] is num) { sigSize.value = (sg['size'] as num).toDouble(); await sp.setDouble('sigSize', sigSize.value); }
+    }
+    snack('Restored $pl playlists, $fv favorites and your play counts.');
+  } catch (_) { snack('Could not read that backup.'); }
+}
 Th themeAt(int i) {
   final b = themes[i], a = artAccent.value;
   if (!adaptiveColors.value || a == null) return b;
@@ -151,6 +214,7 @@ Future<void> main() async {
   adaptiveColors.value = sp.getBool('adaptive') ?? false;
   vizOn.value = sp.getBool('viz') ?? true;
   seasonsOn.value = sp.getBool('seasons') ?? true;
+  gardenCols.value = sp.getInt('gcols') ?? 3;
   player.sequenceStateStream.listen((_) => updateArtAccent());
   applyAutoTheme();
   Timer.periodic(const Duration(minutes: 10), (_) => applyAutoTheme());
@@ -229,7 +293,7 @@ void _diagOnce() {
     try {
       final n = await Permission.notification.status;
       final b = await Permission.ignoreBatteryOptimizations.isGranted;
-      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 9');
+      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 12');
     } catch (_) {}
   });
 }
@@ -324,9 +388,9 @@ void sleepIn(int min) {
     });
     return;
   }
-  snack('Music will fade out in $min min');
+  snack('Music will fade out and stop in $min min');
   _sl = Timer(Duration(minutes: min), () async {
-    for (int i = 20; i >= 0; i--) { await player.setVolume(i / 20); await Future.delayed(const Duration(milliseconds: 150)); }
+    for (int i = 20; i >= 0; i--) { await player.setVolume(i / 20); await Future.delayed(const Duration(milliseconds: 750)); }
     await player.pause(); await player.setVolume(1);
   });
 }
@@ -387,7 +451,7 @@ class _SplashS extends State<Splash> with SingleTickerProviderStateMixin {
           const SizedBox(height: 8),
           Text('DEEP, BLUE AND MIST', style: TextStyle(fontSize: 12, letterSpacing: 5, color: th.tx.withOpacity(.6))),
           const SizedBox(height: 10),
-          Text('build 9', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
+          Text('build 12', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
           const SizedBox(height: 26),
           SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: th.ac)),
         ])))));
@@ -592,7 +656,7 @@ class _LibS extends State<LibraryPage> {
         });
       } else {
         final g = <String, List<Track>>{};
-        for (final t in l) { (g[tab == 1 ? t.album : t.artist] ??= []).add(t); }
+        for (final t in l) { (g[tab == 1 ? t.album : tab == 5 ? folderName(t.path) : t.artist] ??= []).add(t); }
         final keys = g.keys.toList()..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
         body = ListView(key: ValueKey('g$tab'), children: [for (final k in keys) ExpansionTile(
             leading: Art(g[k]!.first, 48, tab == 2 ? 24 : 12), title: Text(k, maxLines: 1, overflow: TextOverflow.ellipsis),
@@ -614,7 +678,7 @@ class _LibS extends State<LibraryPage> {
             decoration: InputDecoration(hintText: 'Search songs, artists, albums', prefixIcon: const Icon(Icons.search), filled: true,
                 fillColor: th.bg.withOpacity(.55), border: OutlineInputBorder(borderRadius: BorderRadius.circular(28), borderSide: BorderSide.none)))),
         SizedBox(height: 44, child: ListView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 12), children: [
-          for (final e in ['Songs', 'Albums', 'Artists', 'Favorites', 'Playlists'].asMap().entries)
+          for (final e in ['Songs', 'Albums', 'Artists', 'Favorites', 'Playlists', 'Folders'].asMap().entries)
             Padding(padding: const EdgeInsets.symmetric(horizontal: 4), child: ChoiceChip(label: Text(e.value), selected: tab == e.key,
                 onSelected: (_) { HapticFeedback.selectionClick(); setState(() => tab = e.key); }))])),
         if (lib.scanning) Padding(padding: const EdgeInsets.fromLTRB(20, 2, 20, 4), child: Text('Found ${lib.found} songs…', style: const TextStyle(fontSize: 12))),
@@ -762,12 +826,14 @@ class NowPlaying extends StatelessWidget {
                 ]))),
                 if (t != null) ListenableBuilder(listenable: lib, builder: (_, __) =>
                     _Glass(lib.favs.contains(t.path) ? Icons.favorite : Icons.favorite_border, () { HapticFeedback.selectionClick(); lib.toggleFav(t); })),
+                if (t != null) _Glass(Icons.lyrics_rounded, () => Navigator.push(c, slideUp(const LyricsPage()))),
                 if (t != null) _Glass(Icons.graphic_eq_rounded, () => infoSheet(c, t)),
               ]),
               if (t != null) Align(alignment: Alignment.centerLeft, child: Container(
                   margin: const EdgeInsets.only(top: 8), padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
                   decoration: BoxDecoration(border: Border.all(color: th.tx.withOpacity(.4)), borderRadius: BorderRadius.circular(20)),
                   child: Text(t.badge, style: const TextStyle(fontSize: 12)))),
+              if (t != null) LyricPeek(t, key: ValueKey(t.path)),
               const Spacer(),
               ValueListenableBuilder<bool>(valueListenable: vizOn, builder: (_, on, __) => on
                   ? const Padding(padding: EdgeInsets.only(bottom: 8), child: VizBars()) : const SizedBox.shrink()),
@@ -799,6 +865,7 @@ void _sheet(BuildContext c, Widget w) => showModalBottomSheet(context: c, showDr
     backgroundColor: th.bg, builder: (_) => Padding(padding: const EdgeInsets.fromLTRB(22, 0, 22, 28), child: w));
 
 void moreSheet(BuildContext c, Track t) => _sheet(c, Column(mainAxisSize: MainAxisSize.min, children: [
+      ListTile(leading: const Icon(Icons.lyrics_rounded), title: const Text('Lyrics'), onTap: () { Navigator.pop(c); Navigator.push(c, slideUp(const LyricsPage())); }),
       ListTile(leading: const Icon(Icons.info_outline), title: const Text('Audio information'), onTap: () { Navigator.pop(c); infoSheet(c, t); }),
       ListTile(leading: const Icon(Icons.playlist_add_rounded), title: const Text('Add to playlist'), onTap: () { Navigator.pop(c); pickPlaylist(c, t); }),
       ListTile(leading: const Icon(Icons.bedtime_outlined), title: const Text('Sleep timer'), onTap: () {
@@ -935,6 +1002,8 @@ class GardenPage extends StatelessWidget {
       final total = es.fold<int>(0, (a, e) => a + e.value);
       final tracks = [for (final e in es) lib.byPath[e.key]!];
       final seasonTxt = seasonsOn.value ? ' · ${seasonName()}' : '';
+      final cols = gardenCols.value;
+      final ratio = cols == 2 ? .86 : cols == 3 ? .74 : .6;
       return CustomScrollView(slivers: [
         SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(20, 8, 20, 12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           const Text('Garden', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w300)),
@@ -943,7 +1012,7 @@ class GardenPage extends StatelessWidget {
         ]))),
         if (es.isEmpty) SliverFillRemaining(hasScrollBody: false, child: Center(child: Icon(Icons.local_florist_outlined, size: 72, color: th.ac)))
         else SliverPadding(padding: const EdgeInsets.fromLTRB(14, 0, 14, 20), sliver: SliverGrid.builder(
-            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 2, mainAxisSpacing: 12, crossAxisSpacing: 12, childAspectRatio: .86),
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: cols, mainAxisSpacing: 10, crossAxisSpacing: 10, childAspectRatio: ratio),
             itemCount: tracks.length,
             itemBuilder: (_, i) {
               final t = tracks[i], n = es[i].value;
@@ -951,9 +1020,10 @@ class GardenPage extends StatelessWidget {
                   decoration: BoxDecoration(color: th.bg.withOpacity(.5), borderRadius: BorderRadius.circular(22), border: Border.all(color: Colors.white54)),
                   child: Column(children: [
                     Expanded(child: RepaintBoundary(child: CustomPaint(size: Size.infinite, painter: BloomPainter(seedOf(t.path), .5 + .45 * m.min(1.0, n / 20), 0, bloomBase(), tier: rareTier(n))))),
-                    Padding(padding: const EdgeInsets.fromLTRB(10, 0, 10, 10), child: Column(children: [
-                      Text(t.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600)),
-                      Text('${bloomStage(n)} · $n plays', style: const TextStyle(fontSize: 12))])),
+                    Padding(padding: const EdgeInsets.fromLTRB(6, 0, 6, 8), child: Column(children: [
+                      Text(t.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.w600, fontSize: cols == 2 ? 15 : 12)),
+                      Text(cols == 2 ? '${bloomStage(n)} · $n plays' : cols == 3 ? '${bloomStage(n)} · $n' : '$n×',
+                          maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: cols == 2 ? 12 : 10))])),
                   ])));
             })),
       ]);
@@ -1058,6 +1128,12 @@ class SettingsPage extends StatelessWidget {
       _sw(adaptiveColors, 'adaptive', Icons.palette_outlined, 'Colors from album art', 'The accent color follows the cover of the song playing', updateArtAccent),
       _sw(vizOn, 'viz', Icons.equalizer_rounded, 'Visualizer', 'Moving bars on the player while music plays'),
       _sw(seasonsOn, 'seasons', Icons.eco_outlined, 'Garden seasons', 'Your flowers take on the colors of the season'),
+      ValueListenableBuilder<int>(valueListenable: gardenCols, builder: (_, v, __) => ListTile(
+          leading: const Icon(Icons.local_florist_outlined), title: const Text('Garden flower size'),
+          subtitle: Padding(padding: const EdgeInsets.only(top: 8), child: Wrap(spacing: 8, children: [
+            for (final e in [[2, 'Large'], [3, 'Medium'], [4, 'Small']]) ChoiceChip(
+                label: Text(e[1] as String), selected: v == e[0],
+                onSelected: (_) async { gardenCols.value = e[0] as int; (await SharedPreferences.getInstance()).setInt('gcols', e[0] as int); })])))),
       ListenableBuilder(listenable: Listenable.merge([sigText, sigFont, sigSize]), builder: (ctx, _) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         ListTile(leading: const Icon(Icons.edit_outlined), title: const Text('Signature text'), subtitle: Text(sigText.value),
             onTap: () async {
@@ -1075,6 +1151,10 @@ class SettingsPage extends StatelessWidget {
         Center(child: Padding(padding: const EdgeInsets.only(bottom: 8),
             child: Text(sigText.value, style: sigStyle(sigFont.value, sigSize.value, th.tx.withOpacity(.7))))),
       ])),
+      ListTile(leading: const Icon(Icons.backup_outlined), title: const Text('Back up to clipboard'),
+          subtitle: const Text('Playlists, favorites, play counts and signature'), onTap: backupToClipboard),
+      ListTile(leading: const Icon(Icons.restore_rounded), title: const Text('Restore from clipboard'),
+          subtitle: const Text('Copy a Cadence backup first, then tap here'), onTap: restoreFromClipboard),
       ListTile(leading: const Icon(Icons.insights_rounded), title: const Text('Listening stats'),
           onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const StatsPage()))),
       ListTile(leading: const Icon(Icons.refresh_rounded), title: const Text('Rescan device for music'), onTap: lib.scan),
@@ -1127,5 +1207,246 @@ class StatsPage extends StatelessWidget {
                   trailing: Text('${e.value}x')),
             ]),
     );
+  }
+}
+
+// ---------------- Lyrics ----------------
+class LrcLine { final Duration t; final String s; const LrcLine(this.t, this.s); }
+class Lyrics { final List<LrcLine> lines; final bool synced; const Lyrics(this.lines, this.synced); }
+final lyricMem = <String, Lyrics?>{};
+
+Lyrics? parseLyrics(String txt) {
+  final re = RegExp(r'\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]');
+  final meta = RegExp(r'^\[[a-zA-Z]+:.*\]$');
+  final out = <LrcLine>[], plain = <LrcLine>[];
+  for (final raw in txt.split(RegExp(r'\r?\n'))) {
+    final ms = re.allMatches(raw).toList();
+    final text = raw.replaceAll(re, '').trim();
+    if (ms.isEmpty) {
+      if (text.isNotEmpty && !meta.hasMatch(text)) plain.add(LrcLine(Duration.zero, text));
+      continue;
+    }
+    for (final x in ms) {
+      final mn = int.parse(x.group(1)!), sc = int.parse(x.group(2)!);
+      final fr = x.group(3);
+      final msec = fr == null ? 0 : fr.length == 1 ? int.parse(fr) * 100 : fr.length == 2 ? int.parse(fr) * 10 : int.parse(fr);
+      out.add(LrcLine(Duration(minutes: mn, seconds: sc, milliseconds: msec), text));
+    }
+  }
+  if (out.isNotEmpty) { out.sort((a, b) => a.t.compareTo(b.t)); return Lyrics(out, true); }
+  if (plain.isNotEmpty) return Lyrics(plain, false);
+  return null;
+}
+
+String _lyPath(Track t) => '${lib.docs.path}/lyrics/${seedOf(t.path)}.lrc';
+
+Future<Lyrics?> localLyrics(Track t) async {
+  try {
+    final f = File(_lyPath(t));
+    if (await f.exists()) return parseLyrics(await f.readAsString());
+  } catch (_) {}
+  try {
+    final i = t.path.lastIndexOf('.');
+    if (i > 0) {
+      final f = File('${t.path.substring(0, i)}.lrc');
+      if (await f.exists()) return parseLyrics(await f.readAsString());
+    }
+  } catch (_) {}
+  return null;
+}
+
+Future<void> saveLyricsText(Track t, String txt) async {
+  final f = File(_lyPath(t));
+  await f.parent.create(recursive: true);
+  await f.writeAsString(txt);
+}
+
+Future<dynamic> _getJson(Uri u) async {
+  final c = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+  try {
+    final rq = await c.getUrl(u);
+    rq.headers.set('User-Agent', 'Cadence/1.0');
+    final rs = await rq.close().timeout(const Duration(seconds: 12));
+    if (rs.statusCode != 200) return null;
+    return jsonDecode(await rs.transform(utf8.decoder).join());
+  } finally { c.close(force: true); }
+}
+
+// Free public lyrics database (lrclib.net). Needs internet.
+Future<String?> fetchLrclib(Track t) async {
+  try {
+    final q = <String, String>{'track_name': t.title};
+    final known = !t.artist.startsWith('Unknown');
+    if (known) q['artist_name'] = t.artist;
+    if (!t.album.startsWith('Unknown')) q['album_name'] = t.album;
+    if (t.dur > 0) q['duration'] = '${(t.dur / 1000).round()}';
+    var j = await _getJson(Uri.https('lrclib.net', '/api/get', q));
+    if (j is Map) {
+      final x = j['syncedLyrics'] ?? j['plainLyrics'];
+      if (x is String && x.trim().isNotEmpty) return x;
+    }
+    final q2 = <String, String>{'track_name': t.title};
+    if (known) q2['artist_name'] = t.artist;
+    j = await _getJson(Uri.https('lrclib.net', '/api/search', q2));
+    if (j is List) {
+      for (final e in j) {
+        if (e is Map && e['syncedLyrics'] is String && (e['syncedLyrics'] as String).trim().isNotEmpty) return e['syncedLyrics'] as String;
+      }
+      for (final e in j) {
+        if (e is Map && e['plainLyrics'] is String && (e['plainLyrics'] as String).trim().isNotEmpty) return e['plainLyrics'] as String;
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
+Future<Lyrics?> getLyrics(Track t, {bool online = true, bool force = false}) async {
+  if (!force && lyricMem.containsKey(t.path) && (lyricMem[t.path] != null || !online)) return lyricMem[t.path];
+  Lyrics? ly;
+  if (!force) ly = await localLyrics(t);
+  if (ly == null && online) {
+    final txt = await fetchLrclib(t);
+    if (txt != null) {
+      ly = parseLyrics(txt);
+      if (ly != null) { try { await saveLyricsText(t, txt); } catch (_) {} }
+    }
+  }
+  lyricMem[t.path] = ly;
+  return ly;
+}
+
+Future<String?> askLong(BuildContext c, String title) {
+  final tc = TextEditingController();
+  return showDialog<String>(context: c, builder: (d) => AlertDialog(title: Text(title),
+      content: SizedBox(height: 260, child: TextField(controller: tc, autofocus: true, maxLines: null, expands: true,
+          textAlignVertical: TextAlignVertical.top, decoration: const InputDecoration(border: OutlineInputBorder()))),
+      actions: [TextButton(onPressed: () => Navigator.pop(d), child: const Text('Cancel')),
+        FilledButton(onPressed: () => Navigator.pop(d, tc.text), child: const Text('Save'))]));
+}
+
+// One live line under the song name on the player.
+class LyricPeek extends StatefulWidget { final Track t; const LyricPeek(this.t, {super.key}); @override State<LyricPeek> createState() => _LP(); }
+class _LP extends State<LyricPeek> {
+  Lyrics? ly;
+  @override
+  void initState() { super.initState(); _l(); }
+  Future<void> _l() async {
+    final r = await getLyrics(widget.t, online: false);
+    if (mounted) setState(() => ly = r);
+  }
+  @override
+  Widget build(BuildContext c) => StreamBuilder<Duration>(stream: player.positionStream, builder: (_, ps) {
+        final l = ly ?? lyricMem[widget.t.path];
+        if (l == null || !l.synced) return const SizedBox.shrink();
+        final pos = (ps.data ?? Duration.zero) + const Duration(milliseconds: 250);
+        var txt = '';
+        for (final x in l.lines) { if (x.t <= pos) { txt = x.s; } else { break; } }
+        return AnimatedSwitcher(
+            duration: const Duration(milliseconds: 350),
+            transitionBuilder: (w, a) => FadeTransition(opacity: a, child: SlideTransition(
+                position: Tween<Offset>(begin: const Offset(0, .5), end: Offset.zero).animate(a), child: w)),
+            child: Padding(key: ValueKey(txt), padding: const EdgeInsets.only(top: 10),
+                child: Text(txt, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 15, color: th.ac, fontWeight: FontWeight.w600))));
+      });
+}
+
+class LyricsPage extends StatelessWidget {
+  const LyricsPage({super.key});
+  @override
+  Widget build(BuildContext c) {
+    Theme.of(c);
+    return StreamBuilder<SequenceState?>(stream: player.sequenceStateStream, builder: (c, s) {
+      final t = curTrack(s.data);
+      return Scaffold(
+          appBar: AppBar(backgroundColor: Colors.transparent, title: Text(t?.title ?? 'Lyrics', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 18))),
+          body: t == null ? const Center(child: Text('Play a song to see its lyrics.')) : LyricsBody(key: ValueKey(t.path), t: t));
+    });
+  }
+}
+
+class LyricsBody extends StatefulWidget { final Track t; const LyricsBody({super.key, required this.t}); @override State<LyricsBody> createState() => _LB(); }
+class _LB extends State<LyricsBody> {
+  Lyrics? ly; bool loading = true; int last = -2;
+  final sc = ScrollController();
+  static const ih = 66.0;
+  @override
+  void initState() { super.initState(); _load(false); }
+  @override
+  void dispose() { sc.dispose(); super.dispose(); }
+  Future<void> _load(bool force) async {
+    setState(() => loading = true);
+    final r = await getLyrics(widget.t, force: force);
+    if (!mounted) return;
+    setState(() { ly = r; loading = false; last = -2; });
+  }
+  Future<void> _apply(String txt) async {
+    final r = parseLyrics(txt);
+    if (r == null) { snack('Could not read those lyrics.'); return; }
+    try { await saveLyricsText(widget.t, txt); } catch (_) {}
+    lyricMem[widget.t.path] = r;
+    if (mounted) setState(() { ly = r; last = -2; });
+  }
+  Future<void> _import() async {
+    try {
+      final r = await FilePicker.platform.pickFiles(type: FileType.any);
+      final p = r?.files.single.path;
+      if (p == null) return;
+      await _apply(await File(p).readAsString());
+    } catch (_) { snack('Could not open that file.'); }
+  }
+  Future<void> _paste() async {
+    final txt = await askLong(context, 'Paste lyrics (LRC or plain text)');
+    if (txt != null && txt.trim().isNotEmpty) await _apply(txt);
+  }
+  Widget _tools() => Wrap(alignment: WrapAlignment.center, spacing: 6, children: [
+        TextButton.icon(onPressed: () => _load(true), icon: const Icon(Icons.refresh_rounded, size: 18), label: const Text('Find online')),
+        TextButton.icon(onPressed: _import, icon: const Icon(Icons.file_open_rounded, size: 18), label: const Text('Import .lrc')),
+        TextButton.icon(onPressed: _paste, icon: const Icon(Icons.paste_rounded, size: 18), label: const Text('Paste')),
+      ]);
+  Widget _synced(List<LrcLine> lines) => LayoutBuilder(builder: (_, bc) {
+        final pad = m.max(0.0, (bc.maxHeight - ih) / 2);
+        return StreamBuilder<Duration>(stream: player.positionStream, builder: (_, ps) {
+          final pos = (ps.data ?? Duration.zero) + const Duration(milliseconds: 250);
+          var idx = -1;
+          for (int i = 0; i < lines.length; i++) { if (lines[i].t <= pos) { idx = i; } else { break; } }
+          if (idx != last) {
+            last = idx;
+            final target = m.max(0, idx) * ih;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (sc.hasClients) sc.animateTo(target, duration: const Duration(milliseconds: 450), curve: Curves.easeOutCubic);
+            });
+          }
+          return ListView.builder(controller: sc, padding: EdgeInsets.symmetric(vertical: pad), itemExtent: ih, itemCount: lines.length, itemBuilder: (_, i) {
+            final cur = i == idx, near = (i - idx).abs() == 1;
+            return InkWell(onTap: () => player.seek(lines[i].t), child: Center(child: AnimatedOpacity(
+                duration: const Duration(milliseconds: 300), opacity: cur ? 1 : near ? .55 : .3,
+                child: AnimatedDefaultTextStyle(duration: const Duration(milliseconds: 300), curve: Curves.easeOut,
+                    style: TextStyle(fontSize: cur ? 25 : 18, fontWeight: cur ? FontWeight.w700 : FontWeight.w500, color: cur ? th.ac : th.tx),
+                    textAlign: TextAlign.center,
+                    child: Padding(padding: const EdgeInsets.symmetric(horizontal: 24),
+                        child: Text(lines[i].s.isEmpty ? '♪' : lines[i].s, textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis))))));
+          });
+        });
+      });
+  @override
+  Widget build(BuildContext c) {
+    Theme.of(c);
+    if (loading) {
+      return Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+        CircularProgressIndicator(color: th.ac), const SizedBox(height: 14), const Text('Looking for lyrics…')]));
+    }
+    final l = ly;
+    if (l == null) {
+      return Center(child: Padding(padding: const EdgeInsets.all(28), child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Icon(Icons.lyrics_outlined, size: 60, color: th.ac), const SizedBox(height: 12),
+        const Text('No lyrics found', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600)), const SizedBox(height: 6),
+        const Text('Cadence checks a .lrc file saved next to the song, then the free LRCLIB database (needs internet).', textAlign: TextAlign.center),
+        const SizedBox(height: 14), _tools()])));
+    }
+    return Column(children: [
+      Expanded(child: l.synced ? _synced(l.lines) : SingleChildScrollView(padding: const EdgeInsets.fromLTRB(24, 8, 24, 16),
+          child: Text(l.lines.map((e) => e.s).join('\n'), textAlign: TextAlign.center, style: const TextStyle(fontSize: 18, height: 1.7)))),
+      Padding(padding: const EdgeInsets.only(bottom: 10), child: _tools()),
+    ]);
   }
 }
