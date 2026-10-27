@@ -19,6 +19,7 @@ final lib = Lib();
 final themeIx = ValueNotifier<int>(0);
 final showSig = ValueNotifier<bool>(true);
 final msgKey = GlobalKey<ScaffoldMessengerState>();
+final navKey = GlobalKey<NavigatorState>();
 
 class Th {
   final String n; final Color bg, bg2, ac, tx; final bool dark;
@@ -215,6 +216,11 @@ Future<void> main() async {
   vizOn.value = sp.getBool('viz') ?? true;
   seasonsOn.value = sp.getBool('seasons') ?? true;
   gardenCols.value = sp.getInt('gcols') ?? 3;
+  try {
+    final dj = jsonDecode(sp.getString('diary') ?? '{}') as Map;
+    for (final e in dj.entries) { diary[e.key as String] = Map<String, dynamic>.from(e.value as Map); }
+    for (final x in sp.getStringList('capsules') ?? <String>[]) { capsules.add(Map<String, dynamic>.from(jsonDecode(x) as Map)); }
+  } catch (_) {}
   player.sequenceStateStream.listen((_) => updateArtAccent());
   applyAutoTheme();
   Timer.periodic(const Duration(minutes: 10), (_) => applyAutoTheme());
@@ -293,7 +299,7 @@ void _diagOnce() {
     try {
       final n = await Permission.notification.status;
       final b = await Permission.ignoreBatteryOptimizations.isGranted;
-      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 12');
+      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 13');
     } catch (_) {}
   });
 }
@@ -359,7 +365,7 @@ void _countTimer() {
   final tag = seq[i].tag;
   if (tag is! MediaItem) return;
   _ct = Timer(const Duration(seconds: 20), () {
-    if (player.playing && player.currentIndex == i) { lib.countPlay(tag.id); recentAdd(tag.id); }
+    if (player.playing && player.currentIndex == i) { lib.countPlay(tag.id); recentAdd(tag.id); final tr = lib.byPath[tag.id]; if (tr != null) diaryAdd(tr); }
   });
 }
 
@@ -406,7 +412,7 @@ class CadenceApp extends StatelessWidget {
             .copyWith(primary: t.ac, onSurface: t.tx, surface: t.bg);
         final base = ThemeData(useMaterial3: true, colorScheme: cs);
         return MaterialApp(
-          title: 'Cadence', debugShowCheckedModeBanner: false, scaffoldMessengerKey: msgKey,
+          title: 'Cadence', debugShowCheckedModeBanner: false, scaffoldMessengerKey: msgKey, navigatorKey: navKey,
           theme: base.copyWith(scaffoldBackgroundColor: Colors.transparent,
               textTheme: base.textTheme.apply(bodyColor: t.tx, displayColor: t.tx)),
           builder: (c, child) => Stack(children: [
@@ -436,7 +442,7 @@ class _SplashS extends State<Splash> with SingleTickerProviderStateMixin {
       Navigator.pushReplacement(context, PageRouteBuilder(transitionDuration: const Duration(milliseconds: 700),
           pageBuilder: (_, __, ___) => const Home(),
           transitionsBuilder: (_, a, __, ch) => FadeTransition(opacity: a, child: ch)));
-      Future.delayed(const Duration(milliseconds: 900), startupPerms);
+      Future.delayed(const Duration(milliseconds: 900), () async { await startupPerms(); checkCapsules(); });
     });
   }
   @override
@@ -451,7 +457,7 @@ class _SplashS extends State<Splash> with SingleTickerProviderStateMixin {
           const SizedBox(height: 8),
           Text('DEEP, BLUE AND MIST', style: TextStyle(fontSize: 12, letterSpacing: 5, color: th.tx.withOpacity(.6))),
           const SizedBox(height: 10),
-          Text('build 12', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
+          Text('build 13', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
           const SizedBox(height: 26),
           SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: th.ac)),
         ])))));
@@ -867,6 +873,7 @@ void _sheet(BuildContext c, Widget w) => showModalBottomSheet(context: c, showDr
 void moreSheet(BuildContext c, Track t) => _sheet(c, Column(mainAxisSize: MainAxisSize.min, children: [
       ListTile(leading: const Icon(Icons.lyrics_rounded), title: const Text('Lyrics'), onTap: () { Navigator.pop(c); Navigator.push(c, slideUp(const LyricsPage())); }),
       ListTile(leading: const Icon(Icons.info_outline), title: const Text('Audio information'), onTap: () { Navigator.pop(c); infoSheet(c, t); }),
+      ListTile(leading: const Icon(Icons.hourglass_bottom_rounded), title: const Text('Time capsule'), subtitle: const Text('Hide this song with a note for later'), onTap: () { Navigator.pop(c); capsuleSheet(c, t); }),
       ListTile(leading: const Icon(Icons.playlist_add_rounded), title: const Text('Add to playlist'), onTap: () { Navigator.pop(c); pickPlaylist(c, t); }),
       ListTile(leading: const Icon(Icons.bedtime_outlined), title: const Text('Sleep timer'), onTap: () {
         Navigator.pop(c);
@@ -1155,6 +1162,12 @@ class SettingsPage extends StatelessWidget {
           subtitle: const Text('Playlists, favorites, play counts and signature'), onTap: backupToClipboard),
       ListTile(leading: const Icon(Icons.restore_rounded), title: const Text('Restore from clipboard'),
           subtitle: const Text('Copy a Cadence backup first, then tap here'), onTap: restoreFromClipboard),
+      ListTile(leading: const Icon(Icons.auto_awesome_rounded), title: const Text('Music constellations'),
+          subtitle: const Text('Your songs as stars, grouped by artist'),
+          onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const SkyPage()))),
+      ListTile(leading: const Icon(Icons.menu_book_rounded), title: const Text('Listening diary'),
+          subtitle: const Text('A line for every day you listened'),
+          onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const DiaryPage()))),
       ListTile(leading: const Icon(Icons.insights_rounded), title: const Text('Listening stats'),
           onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const StatsPage()))),
       ListTile(leading: const Icon(Icons.refresh_rounded), title: const Text('Rescan device for music'), onTap: lib.scan),
@@ -1449,4 +1462,206 @@ class _LB extends State<LyricsBody> {
       Padding(padding: const EdgeInsets.only(bottom: 10), child: _tools()),
     ]);
   }
+}
+
+// ---------------- Listening diary ----------------
+final diary = <String, Map<String, dynamic>>{};
+Future<void> diaryAdd(Track t) async {
+  final n = DateTime.now();
+  final k = '${n.year}-${n.month.toString().padLeft(2, '0')}-${n.day.toString().padLeft(2, '0')}';
+  final d = diary.putIfAbsent(k, () => <String, dynamic>{'n': 0, 'ms': 0, 'a': <String, dynamic>{}, 't': <String, dynamic>{}});
+  d['n'] = (d['n'] as int) + 1;
+  d['ms'] = (d['ms'] as int) + t.dur;
+  final a = d['a'] as Map, tt = d['t'] as Map;
+  a[t.artist] = ((a[t.artist] ?? 0) as int) + 1;
+  tt[t.title] = ((tt[t.title] ?? 0) as int) + 1;
+  (await SharedPreferences.getInstance()).setString('diary', jsonEncode(diary));
+}
+
+String diaryLine(String k, Map<String, dynamic> d) {
+  const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  final dt = DateTime.parse(k);
+  final n = d['n'] as int;
+  final mood = n < 5 ? 'A quiet' : n < 15 ? 'A steady' : 'A busy';
+  final a = (d['a'] as Map).entries.toList()..sort((x, y) => (y.value as int).compareTo(x.value as int));
+  final tt = (d['t'] as Map).entries.toList()..sort((x, y) => (y.value as int).compareTo(x.value as int));
+  var s = '$mood ${days[dt.weekday - 1]} with $n song${n == 1 ? '' : 's'}';
+  if (a.isNotEmpty) s += ', mostly ${a.first.key}';
+  if (tt.isNotEmpty && (tt.first.value as int) > 1) s += '. You replayed "${tt.first.key}" ${tt.first.value} times';
+  return '$s.';
+}
+
+class DiaryPage extends StatelessWidget {
+  const DiaryPage({super.key});
+  @override
+  Widget build(BuildContext c) {
+    Theme.of(c);
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    final keys = diary.keys.toList()..sort((a, b) => b.compareTo(a));
+    return Scaffold(
+      appBar: AppBar(title: const Text('Listening diary')),
+      body: keys.isEmpty
+          ? const Center(child: Padding(padding: EdgeInsets.all(32), child: Text('Your diary fills in as you listen. Come back tomorrow.', textAlign: TextAlign.center)))
+          : ListView.builder(padding: const EdgeInsets.all(16), itemCount: keys.length, itemBuilder: (_, i) {
+              final k = keys[i], d = diary[k]!, dt = DateTime.parse(k);
+              final mins = ((d['ms'] as int) / 60000).round();
+              return Container(margin: const EdgeInsets.only(bottom: 12), padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(color: th.ac.withOpacity(.1), borderRadius: BorderRadius.circular(18)),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('${months[dt.month - 1]} ${dt.day}, ${dt.year}', style: TextStyle(fontSize: 12, letterSpacing: 1, color: th.tx.withOpacity(.6))),
+                    const SizedBox(height: 6),
+                    Text(diaryLine(k, d), style: const TextStyle(fontSize: 17, height: 1.4)),
+                    const SizedBox(height: 6),
+                    Text('about $mins min of music', style: TextStyle(fontSize: 12, color: th.tx.withOpacity(.6))),
+                  ]));
+            }),
+    );
+  }
+}
+
+// ---------------- Time capsules ----------------
+final capsules = <Map<String, dynamic>>[];
+Future<void> saveCapsules() async =>
+    (await SharedPreferences.getInstance()).setStringList('capsules', [for (final x in capsules) jsonEncode(x)]);
+
+Future<void> capsuleSheet(BuildContext c, Track t) async {
+  final note = await askLong(c, 'Write a note to your future self');
+  if (note == null || note.trim().isEmpty) return;
+  if (!c.mounted) return;
+  _sheet(c, Column(mainAxisSize: MainAxisSize.min, children: [
+    const Text('Open it in…', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+    const SizedBox(height: 12),
+    Wrap(spacing: 8, children: [
+      for (final e in [['1 week', 7], ['1 month', 30], ['6 months', 182], ['1 year', 365]])
+        ActionChip(label: Text(e[0] as String), onPressed: () async {
+          Navigator.pop(c);
+          final now = DateTime.now();
+          capsules.add({'path': t.path, 'note': note.trim(), 'made': now.millisecondsSinceEpoch,
+            'open': now.add(Duration(days: e[1] as int)).millisecondsSinceEpoch});
+          await saveCapsules();
+          snack('Sealed. It opens in ${e[0]}.');
+        })]),
+  ]));
+}
+
+Future<void> checkCapsules() async {
+  final now = DateTime.now().millisecondsSinceEpoch;
+  final due = capsules.where((x) => (x['open'] as int) <= now).toList();
+  for (final cp in due) {
+    final ctx = navKey.currentState?.overlay?.context;
+    if (ctx == null) return;
+    final t = lib.byPath[cp['path'] as String];
+    final made = DateTime.fromMillisecondsSinceEpoch(cp['made'] as int);
+    final play = await showDialog<bool>(context: ctx, barrierDismissible: false, builder: (d) => AlertDialog(
+        title: const Text('A time capsule opened'),
+        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('You sealed this on ${made.day}/${made.month}/${made.year}:'),
+          const SizedBox(height: 10),
+          Text('"${cp['note']}"', style: const TextStyle(fontStyle: FontStyle.italic, fontSize: 16)),
+          if (t != null) ...[const SizedBox(height: 12), Text('${t.title} · ${t.artist}', style: const TextStyle(fontWeight: FontWeight.w600))],
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('Close')),
+          if (t != null) FilledButton(onPressed: () => Navigator.pop(d, true), child: const Text('Play it')),
+        ]));
+    capsules.remove(cp);
+    await saveCapsules();
+    if (play == true && t != null) await playList([t], 0);
+  }
+}
+
+// ---------------- Music constellations ----------------
+const kSky = 2100.0;
+class _Star { final Offset p; final Track t; final double r; const _Star(this.p, this.t, this.r); }
+class _Group {
+  final String name; final Offset c; final List<_Star> stars; final TextPainter tp;
+  _Group(this.name, this.c, this.stars, this.tp);
+}
+final _bgStars = List<Offset>.generate(220, (i) { final r = m.Random(i); return Offset(r.nextDouble() * kSky, r.nextDouble() * kSky); });
+
+List<_Group> skyLayout() {
+  final g = <String, List<Track>>{};
+  for (final t in lib.tracks) { (g[t.artist] ??= []).add(t); }
+  int score(List<Track> l) => l.fold<int>(0, (a, t) => a + 1 + (lib.plays[t.path] ?? 0));
+  final keys = g.keys.toList()..sort((a, b) => score(g[b]!).compareTo(score(g[a]!)));
+  final out = <_Group>[];
+  for (int k = 0; k < keys.length && k < 40; k++) {
+    final name = keys[k], l = g[name]!;
+    final a = k * 2.399963 + .5, rr = 140.0 * m.sqrt(k + .5);
+    final c = Offset(kSky / 2 + rr * m.cos(a), kSky / 2 + rr * m.sin(a));
+    final stars = <_Star>[];
+    for (int j = 0; j < l.length && j < 24; j++) {
+      final ang = j * 2.4 + (seedOf(name) % 7), rad = 24.0 + 13 * m.sqrt(j.toDouble());
+      stars.add(_Star(c + Offset(m.cos(ang), m.sin(ang)) * rad, l[j], 2.5 + 5 * m.min(1.0, (lib.plays[l[j].path] ?? 0) / 30)));
+    }
+    final tp = TextPainter(text: TextSpan(text: name, style: TextStyle(color: Colors.white.withOpacity(.6), fontSize: 14)),
+        textDirection: TextDirection.ltr, maxLines: 1, ellipsis: '…')..layout(maxWidth: 170);
+    out.add(_Group(name, c, stars, tp));
+  }
+  return out;
+}
+
+class SkyPage extends StatefulWidget { const SkyPage({super.key}); @override State<SkyPage> createState() => _SkyS(); }
+class _SkyS extends State<SkyPage> with SingleTickerProviderStateMixin {
+  late final AnimationController an = AnimationController(vsync: this, duration: const Duration(seconds: 8))..repeat();
+  final tc = TransformationController();
+  late final List<_Group> groups = skyLayout();
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final sz = MediaQuery.sizeOf(context);
+      tc.value = Matrix4.translationValues(-(kSky - sz.width) / 2, -(kSky - sz.height) / 2, 0);
+    });
+  }
+  @override
+  void dispose() { an.dispose(); tc.dispose(); super.dispose(); }
+  void _tap(Offset p) {
+    _Star? best; var bd = 30.0;
+    for (final g in groups) {
+      for (final s in g.stars) {
+        final d = (s.p - p).distance;
+        if (d < bd) { bd = d; best = s; }
+      }
+    }
+    if (best != null) { snack('${best.t.title} · ${best.t.artist}'); playList([best.t], 0); }
+  }
+  @override
+  Widget build(BuildContext c) => Scaffold(
+        backgroundColor: const Color(0xFF080C1A),
+        appBar: AppBar(title: const Text('Music constellations'), backgroundColor: Colors.transparent),
+        body: groups.isEmpty
+            ? const Center(child: Text('No songs yet.', style: TextStyle(color: Colors.white70)))
+            : InteractiveViewer(transformationController: tc, constrained: false, minScale: .25, maxScale: 4, boundaryMargin: const EdgeInsets.all(300),
+                child: GestureDetector(onTapUp: (d) => _tap(d.localPosition),
+                    child: SizedBox(width: kSky, height: kSky, child: AnimatedBuilder(animation: an,
+                        builder: (_, __) => CustomPaint(painter: _SkyP(groups, an.value, th.ac)))))),
+      );
+}
+
+class _SkyP extends CustomPainter {
+  final List<_Group> groups; final double t; final Color ac;
+  _SkyP(this.groups, this.t, this.ac);
+  @override
+  void paint(Canvas cv, Size sz) {
+    final bg = Paint()..color = Colors.white.withOpacity(.25);
+    for (final p in _bgStars) { cv.drawCircle(p, .9, bg); }
+    final line = Paint()..style = PaintingStyle.stroke..strokeWidth = 1..color = ac.withOpacity(.4);
+    var gi = 0;
+    for (final g in groups) {
+      for (int j = 1; j < g.stars.length; j++) { cv.drawLine(g.stars[j - 1].p, g.stars[j].p, line); }
+      for (int j = 0; j < g.stars.length; j++) {
+        final s = g.stars[j];
+        final tw = .65 + .35 * m.sin(t * 6.2832 + j + gi);
+        cv.drawCircle(s.p, s.r * 2.4, Paint()..color = ac.withOpacity(.14 * tw));
+        cv.drawCircle(s.p, s.r, Paint()..color = Colors.white.withOpacity(tw));
+      }
+      final rad = 24.0 + 13 * m.sqrt(g.stars.length.toDouble());
+      g.tp.paint(cv, Offset(g.c.dx - g.tp.width / 2, g.c.dy + rad + 6));
+      gi++;
+    }
+  }
+  @override
+  bool shouldRepaint(covariant _SkyP o) => true;
 }
