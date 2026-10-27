@@ -32,6 +32,13 @@ const themes = [
   Th('Forest Shadow', Color(0xFF0F1F17), Color(0xFF24523A), Color(0xFF7FBF8E), Color(0xFFDCEBE0), true),
 ];
 Th get th => themes[themeIx.value];
+final autoTheme = ValueNotifier<bool>(false);
+void applyAutoTheme() {
+  if (!autoTheme.value) return;
+  final h = DateTime.now().hour;
+  final ix = (h >= 5 && h < 11) ? 0 : (h >= 11 && h < 17) ? 2 : (h >= 17 && h < 20) ? 5 : (h >= 20 && h < 23) ? 1 : 3;
+  if (themeIx.value != ix) themeIx.value = ix;
+}
 void snack(String s) => msgKey.currentState?..hideCurrentSnackBar()..showSnackBar(SnackBar(content: Text(s)));
 String fmt(Duration d) { final s = d.inSeconds; return '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}'; }
 
@@ -44,6 +51,9 @@ Future<void> main() async {
   final sp = await SharedPreferences.getInstance();
   themeIx.value = sp.getInt('theme') ?? 0;
   showSig.value = sp.getBool('sig') ?? true;
+  autoTheme.value = sp.getBool('auto') ?? false;
+  applyAutoTheme();
+  Timer.periodic(const Duration(minutes: 10), (_) => applyAutoTheme());
   player.playbackEventStream.listen((_) {}, onError: (e, st) => snack('This file cannot be played (missing or unsupported).'));
   player.currentIndexStream.listen((_) { saveState(); _countTimer(); });
   player.playingStream.listen((_) => saveState());
@@ -119,7 +129,7 @@ void _diagOnce() {
     try {
       final n = await Permission.notification.status;
       final b = await Permission.ignoreBatteryOptimizations.isGranted;
-      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 6');
+      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 7');
     } catch (_) {}
   });
 }
@@ -201,9 +211,19 @@ Future<void> addToQueue(Track t, {bool next = false}) async {
 Future<void> playNext(Track t) => addToQueue(t, next: true);
 
 Timer? _sl;
+StreamSubscription<int?>? _slSub;
 void sleepIn(int min) {
   _sl?.cancel();
+  _slSub?.cancel(); _slSub = null;
   if (min == 0) { snack('Sleep timer off'); return; }
+  if (min == -1) {
+    final i0 = player.currentIndex;
+    snack('Music will stop after this song');
+    _slSub = player.currentIndexStream.listen((x) {
+      if (x != i0) { player.pause(); _slSub?.cancel(); _slSub = null; }
+    });
+    return;
+  }
   snack('Music will fade out in $min min');
   _sl = Timer(Duration(minutes: min), () async {
     for (int i = 20; i >= 0; i--) { await player.setVolume(i / 20); await Future.delayed(const Duration(milliseconds: 150)); }
@@ -267,7 +287,7 @@ class _SplashS extends State<Splash> with SingleTickerProviderStateMixin {
           const SizedBox(height: 8),
           Text('DEEP, BLUE AND MIST', style: TextStyle(fontSize: 12, letterSpacing: 5, color: th.tx.withOpacity(.6))),
           const SizedBox(height: 10),
-          Text('build 6', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
+          Text('build 7', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
           const SizedBox(height: 26),
           SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: th.ac)),
         ])))));
@@ -362,7 +382,9 @@ class MiniPlayer extends StatelessWidget {
   Widget build(BuildContext c) => StreamBuilder<SequenceState?>(stream: player.sequenceStateStream, builder: (_, s) {
         final t = curTrack(s.data);
         return AnimatedSize(duration: const Duration(milliseconds: 300), curve: Curves.easeOutCubic,
-            child: t == null ? const SizedBox(width: double.infinity) : InkWell(
+            child: t == null ? const SizedBox(width: double.infinity) : GestureDetector(
+                onHorizontalDragEnd: (d) { final v = d.primaryVelocity ?? 0; if (v < -300) { player.seekToNext(); } else if (v > 300) { player.seekToPrevious(); } },
+                child: InkWell(
                 onTap: () => Navigator.push(c, slideUp(const NowPlaying())),
                 child: Padding(padding: const EdgeInsets.fromLTRB(14, 8, 8, 4), child: Row(children: [
                   Hero(tag: 'art', child: Art(t, 46, 12)), const SizedBox(width: 12),
@@ -372,7 +394,7 @@ class MiniPlayer extends StatelessWidget {
                   ])),
                   const PlayBtn(44),
                   IconButton(icon: const Icon(Icons.skip_next_rounded), onPressed: player.seekToNext),
-                ]))));
+                ])))));
       });
 }
 
@@ -631,11 +653,11 @@ void moreSheet(BuildContext c, Track t) => _sheet(c, Column(mainAxisSize: MainAx
       ListTile(leading: const Icon(Icons.playlist_add_rounded), title: const Text('Add to playlist'), onTap: () { Navigator.pop(c); pickPlaylist(c, t); }),
       ListTile(leading: const Icon(Icons.bedtime_outlined), title: const Text('Sleep timer'), onTap: () {
         Navigator.pop(c);
-        _sheet(c, Wrap(spacing: 8, children: [for (final v in [0, 5, 15, 30, 45, 60]) ActionChip(label: Text(v == 0 ? 'Off' : '$v min'), onPressed: () { sleepIn(v); Navigator.pop(c); })]));
+        _sheet(c, Wrap(spacing: 8, children: [for (final v in [0, -1, 5, 15, 30, 45, 60]) ActionChip(label: Text(v == 0 ? 'Off' : v == -1 ? 'End of song' : '$v min'), onPressed: () { sleepIn(v); Navigator.pop(c); })]));
       }),
       ListTile(leading: const Icon(Icons.speed_rounded), title: const Text('Playback speed'), onTap: () {
         Navigator.pop(c);
-        _sheet(c, Wrap(spacing: 8, children: [for (final v in [.75, 1.0, 1.25, 1.5, 2.0]) ActionChip(label: Text('${v}x'), onPressed: () { player.setSpeed(v); Navigator.pop(c); })]));
+        _sheet(c, Wrap(spacing: 8, children: [for (final v in [.5, .75, 1.0, 1.25, 1.5, 1.75, 2.0]) ActionChip(label: Text('${v}x'), onPressed: () { player.setSpeed(v); Navigator.pop(c); })]));
       }),
     ]));
 
@@ -853,7 +875,7 @@ class SettingsPage extends StatelessWidget {
       const Text('Settings', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w300)), const SizedBox(height: 16),
       const Text('Theme', style: TextStyle(fontWeight: FontWeight.w600)), const SizedBox(height: 10),
       Wrap(spacing: 10, runSpacing: 10, children: [for (int i = 0; i < themes.length; i++) GestureDetector(
-          onTap: () async { themeIx.value = i; HapticFeedback.selectionClick(); (await SharedPreferences.getInstance()).setInt('theme', i); },
+          onTap: () async { autoTheme.value = false; themeIx.value = i; HapticFeedback.selectionClick(); final sp = await SharedPreferences.getInstance(); await sp.setInt('theme', i); await sp.setBool('auto', false); },
           child: AnimatedContainer(duration: const Duration(milliseconds: 250), padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
               decoration: BoxDecoration(color: themes[i].bg, borderRadius: BorderRadius.circular(16),
                   border: Border.all(color: themeIx.value == i ? themes[i].ac : Colors.black12, width: 2)),
@@ -861,6 +883,10 @@ class SettingsPage extends StatelessWidget {
                 CircleAvatar(radius: 7, backgroundColor: themes[i].ac), const SizedBox(width: 8),
                 Text(themes[i].n, style: TextStyle(color: themes[i].tx))])))]),
       const SizedBox(height: 12),
+      ValueListenableBuilder<bool>(valueListenable: autoTheme, builder: (_, on, __) => SwitchListTile(
+          secondary: const Icon(Icons.wb_twilight_rounded), title: const Text('Theme by time of day'),
+          subtitle: const Text('Mist in the morning, deep blue at night'), value: on,
+          onChanged: (v) async { autoTheme.value = v; (await SharedPreferences.getInstance()).setBool('auto', v); applyAutoTheme(); })),
       ValueListenableBuilder<bool>(valueListenable: showSig, builder: (_, on, __) => SwitchListTile(
           secondary: const Icon(Icons.draw_outlined), title: const Text('Show signature'),
           subtitle: const Text('The small "TanimSarker" script on the player'), value: on,
