@@ -37,8 +37,6 @@ const themes = [
 final adaptiveColors = ValueNotifier<bool>(false);
 final artAccent = ValueNotifier<Color?>(null);
 final vizOn = ValueNotifier<bool>(true);
-final seasonsOn = ValueNotifier<bool>(true);
-final gardenCols = ValueNotifier<int>(3);
 String folderName(String path) {
   final parts = path.replaceAll('\\', '/').split('/');
   if (parts.length >= 3) return '${parts[parts.length - 3]}/${parts[parts.length - 2]}';
@@ -149,19 +147,6 @@ Widget _sw(ValueNotifier<bool> n, String key, IconData ic, String title, String 
         secondary: Icon(ic), title: Text(title), subtitle: Text(sub), value: on,
         onChanged: (v) async { n.value = v; HapticFeedback.selectionClick(); (await SharedPreferences.getInstance()).setBool(key, v); after?.call(); }));
 
-Color seasonTint() {
-  final mo = DateTime.now().month;
-  if (mo >= 3 && mo <= 5) return const Color(0xFFF4A6C0);
-  if (mo >= 6 && mo <= 8) return const Color(0xFFFFC857);
-  if (mo >= 9 && mo <= 11) return const Color(0xFFE07A3F);
-  return const Color(0xFF8EC9F0);
-}
-String seasonName() {
-  final mo = DateTime.now().month;
-  return mo >= 3 && mo <= 5 ? 'Spring' : mo >= 6 && mo <= 8 ? 'Summer' : mo >= 9 && mo <= 11 ? 'Autumn' : 'Winter';
-}
-Color bloomBase() => seasonsOn.value ? Color.lerp(th.ac, seasonTint(), .35)! : th.ac;
-int rareTier(int n) => n >= 100 ? 2 : n >= 50 ? 1 : 0;
 final sigText = ValueNotifier<String>('TanimSarker');
 final sigFont = ValueNotifier<int>(0);
 final sigSize = ValueNotifier<double>(22);
@@ -214,8 +199,6 @@ Future<void> main() async {
   recents.value = sp.getStringList('recent') ?? [];
   adaptiveColors.value = sp.getBool('adaptive') ?? false;
   vizOn.value = sp.getBool('viz') ?? true;
-  seasonsOn.value = sp.getBool('seasons') ?? true;
-  gardenCols.value = sp.getInt('gcols') ?? 3;
   try {
     final dj = jsonDecode(sp.getString('diary') ?? '{}') as Map;
     for (final e in dj.entries) { diary[e.key as String] = Map<String, dynamic>.from(e.value as Map); }
@@ -299,7 +282,7 @@ void _diagOnce() {
     try {
       final n = await Permission.notification.status;
       final b = await Permission.ignoreBatteryOptimizations.isGranted;
-      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 13');
+      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 14');
     } catch (_) {}
   });
 }
@@ -457,7 +440,7 @@ class _SplashS extends State<Splash> with SingleTickerProviderStateMixin {
           const SizedBox(height: 8),
           Text('DEEP, BLUE AND MIST', style: TextStyle(fontSize: 12, letterSpacing: 5, color: th.tx.withOpacity(.6))),
           const SizedBox(height: 10),
-          Text('build 13', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
+          Text('build 14', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
           const SizedBox(height: 26),
           SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: th.ac)),
         ])))));
@@ -503,7 +486,7 @@ class _HomeS extends State<Home> with WidgetsBindingObserver {
           duration: const Duration(milliseconds: 350),
           transitionBuilder: (w, a) => FadeTransition(opacity: a,
               child: SlideTransition(position: Tween(begin: const Offset(.04, 0), end: Offset.zero).animate(a), child: w)),
-          child: KeyedSubtree(key: ValueKey(i), child: [const LibraryPage(), const GardenPage(), const EqPage(), const SettingsPage()][i])),
+          child: KeyedSubtree(key: ValueKey(i), child: [const LibraryPage(), const SkyPage(embedded: true), const EqPage(), const SettingsPage()][i])),
       bottomNavigationBar: ClipRect(child: BackdropFilter(
           filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -512,7 +495,7 @@ class _HomeS extends State<Home> with WidgetsBindingObserver {
                 onDestinationSelected: (v) { HapticFeedback.selectionClick(); setState(() => i = v); },
                 destinations: const [
                   NavigationDestination(icon: Icon(Icons.library_music_outlined), selectedIcon: Icon(Icons.library_music), label: 'Library'),
-                  NavigationDestination(icon: Icon(Icons.local_florist_outlined), selectedIcon: Icon(Icons.local_florist), label: 'Garden'),
+                  NavigationDestination(icon: Icon(Icons.auto_awesome_outlined), selectedIcon: Icon(Icons.auto_awesome), label: 'Sky'),
                   NavigationDestination(icon: Icon(Icons.equalizer_rounded), label: 'Equalizer'),
                   NavigationDestination(icon: Icon(Icons.tune_rounded), label: 'Settings'),
                 ]),
@@ -932,42 +915,29 @@ Future<String?> askName(BuildContext c, String init) {
       actions: [TextButton(onPressed: () => Navigator.pop(d), child: const Text('Cancel')), FilledButton(onPressed: () => Navigator.pop(d, tc.text), child: const Text('Save'))]));
 }
 
-class BloomPainter extends CustomPainter {
-  final int seed, tier; final double growth, ph; final Color base;
-  BloomPainter(this.seed, this.growth, this.ph, this.base, {this.tier = 0});
+class AuroraPainter extends CustomPainter {
+  final int seed; final double ph; final Color base;
+  AuroraPainter(this.seed, this.ph, this.base);
   @override
   void paint(Canvas c, Size s) {
-    final ctr = s.center(Offset.zero), r = s.shortestSide / 2 * growth * (1 + .03 * m.sin(ph)), hsl = HSLColor.fromColor(base), n = 6 + seed % 6;
-    c.drawCircle(ctr, r * 1.1, Paint()..color = base.withOpacity(.16)..maskFilter = const MaskFilter.blur(BlurStyle.normal, 24));
-    for (int layer = 0; layer < 3; layer++) {
-      final col = hsl.withHue(((hsl.hue + (seed >> (layer * 3)) % 70 - 20) + 360) % 360).withLightness(m.min(1.0, .45 + layer * .12)).toColor();
-      final len = r * (1 - layer * .22), wid = len * (.34 + ((seed >> 5) % 10) / 60);
-      final rot = (seed % 100) / 100 * m.pi + layer * m.pi / n + ph * .05 * (layer.isEven ? 1 : -1);
-      for (int k = 0; k < n; k++) {
-        c.save(); c.translate(ctr.dx, ctr.dy); c.rotate(rot + k * 2 * m.pi / n);
-        final p = Path()..moveTo(0, 0)..cubicTo(wid, -len * .3, wid * .8, -len * .9, 0, -len)..cubicTo(-wid * .8, -len * .9, -wid, -len * .3, 0, 0);
-        c.drawPath(p, Paint()..color = col.withOpacity(.5));
-        c.drawPath(p, Paint()..style = PaintingStyle.stroke..strokeWidth = 1..color = Colors.white.withOpacity(.35));
-        c.restore();
-      }
+    final hsl = HSLColor.fromColor(base);
+    for (int i = 0; i < 4; i++) {
+      final hue = (hsl.hue + (seed >> (i * 3)) % 90 - 30 + 360) % 360;
+      final col = hsl.withHue(hue).withSaturation(m.min(1.0, hsl.saturation * .9 + .1)).withLightness(.55 + i * .05).toColor();
+      final a = ph * (.35 + i * .12) + seed % 13 + i * 1.7;
+      final p = Offset(s.width * (.5 + .28 * m.cos(a)), s.height * (.5 + .28 * m.sin(a * .8 + i)));
+      final r = s.shortestSide * (.42 - i * .04);
+      c.drawCircle(p, r, Paint()..shader = RadialGradient(colors: [col.withOpacity(.55), col.withOpacity(0)]).createShader(Rect.fromCircle(center: p, radius: r)));
     }
-    if (tier >= 1) c.drawCircle(ctr, r * 1.04, Paint()..style = PaintingStyle.stroke..strokeWidth = 2..color = const Color(0xFFFFD27A).withOpacity(.85));
-    if (tier >= 2) {
-      for (int k = 0; k < 14; k++) {
-        final a = k * 2 * m.pi / 14 + ph * .1, d = r * (1.12 + .06 * m.sin(ph * 2 + k));
-        c.drawCircle(ctr + Offset(m.cos(a), m.sin(a)) * d, 2.2, Paint()..color = Colors.white.withOpacity(.9));
-      }
-    }
-    c.drawCircle(ctr, r * .09, Paint()..color = Colors.white.withOpacity(.85));
+    final ctr = s.center(Offset.zero);
+    c.drawCircle(ctr, s.shortestSide * .26, Paint()..style = PaintingStyle.stroke..strokeWidth = 1..color = Colors.white.withOpacity(.25));
+    c.drawCircle(ctr, s.shortestSide * .08 * (1 + .1 * m.sin(ph * 2)), Paint()..color = Colors.white.withOpacity(.85));
   }
   @override
-  bool shouldRepaint(covariant BloomPainter o) => o.ph != ph || o.growth != growth || o.seed != seed || o.base != base || o.tier != tier;
+  bool shouldRepaint(covariant AuroraPainter o) => o.ph != ph || o.seed != seed || o.base != base;
 }
 
-String bloomStage(int n) => n >= 100 ? 'Crystal bloom' : n >= 50 ? 'Golden bloom' : n >= 20 ? 'Full bloom' : n >= 10 ? 'Bloom' : n >= 5 ? 'Bud' : n >= 1 ? 'Sprout' : 'Seed';
-
-// The big Now Playing card: real album art, or a unique flower generated from the song.
-// Every song's flower grows the more you listen. Tap to flip between art and bloom.
+// The big Now Playing card: real album art, or a slow moving aurora made from the song. Tap to flip.
 class BigArt extends StatefulWidget { final Track? t; final double s; const BigArt(this.t, this.s, {super.key}); @override State<BigArt> createState() => _BA(); }
 class _BA extends State<BigArt> with SingleTickerProviderStateMixin {
   late final c = AnimationController(vsync: this, duration: const Duration(seconds: 1))..repeat();
@@ -989,52 +959,13 @@ class _BA extends State<BigArt> with SingleTickerProviderStateMixin {
                       Container(decoration: BoxDecoration(gradient: RadialGradient(colors: [th.bg, Color.lerp(th.bg, th.bg2, .8)!]))),
                       AnimatedBuilder(animation: c, builder: (_, __) {
                         if (player.playing) ph += .04;
-                        return CustomPaint(size: Size(s, s), painter: BloomPainter(seedOf(t?.path ?? 'cadence'), .55 + .4 * m.min(1.0, plays / 20), ph, bloomBase(), tier: rareTier(plays)));
+                        return CustomPaint(size: Size(s, s), painter: AuroraPainter(seedOf(t?.path ?? 'cadence'), ph, th.ac));
                       }),
-                      Positioned(left: 0, right: 0, bottom: 14, child: Center(child: Text('${bloomStage(plays)} · $plays plays',
+                      Positioned(left: 0, right: 0, bottom: 14, child: Center(child: Text('$plays plays',
                           style: TextStyle(fontSize: 12, letterSpacing: 1.5, color: th.tx.withOpacity(.7))))),
                     ])))
                   : KeyedSubtree(key: const ValueKey('a'), child: Art(t, s, 28))));
     });
-  }
-}
-
-class GardenPage extends StatelessWidget {
-  const GardenPage({super.key});
-  @override
-  Widget build(BuildContext c) {
-    Theme.of(c);
-    return SafeArea(bottom: false, child: ListenableBuilder(listenable: lib, builder: (c, _) {
-      final es = lib.plays.entries.where((e) => lib.byPath[e.key] != null).toList()..sort((a, b) => b.value.compareTo(a.value));
-      final total = es.fold<int>(0, (a, e) => a + e.value);
-      final tracks = [for (final e in es) lib.byPath[e.key]!];
-      final seasonTxt = seasonsOn.value ? ' · ${seasonName()}' : '';
-      final cols = gardenCols.value;
-      final ratio = cols == 2 ? .86 : cols == 3 ? .74 : .6;
-      return CustomScrollView(slivers: [
-        SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.fromLTRB(20, 8, 20, 12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('Garden', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w300)),
-          Text(es.isEmpty ? 'Every song you listen to grows into its own flower here.' : '${es.length} blooms · $total plays$seasonTxt',
-              style: TextStyle(color: th.tx.withOpacity(.65))),
-        ]))),
-        if (es.isEmpty) SliverFillRemaining(hasScrollBody: false, child: Center(child: Icon(Icons.local_florist_outlined, size: 72, color: th.ac)))
-        else SliverPadding(padding: const EdgeInsets.fromLTRB(14, 0, 14, 20), sliver: SliverGrid.builder(
-            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: cols, mainAxisSpacing: 10, crossAxisSpacing: 10, childAspectRatio: ratio),
-            itemCount: tracks.length,
-            itemBuilder: (_, i) {
-              final t = tracks[i], n = es[i].value;
-              return InkWell(borderRadius: BorderRadius.circular(22), onTap: () => playList(tracks, i), child: Container(
-                  decoration: BoxDecoration(color: th.bg.withOpacity(.5), borderRadius: BorderRadius.circular(22), border: Border.all(color: Colors.white54)),
-                  child: Column(children: [
-                    Expanded(child: RepaintBoundary(child: CustomPaint(size: Size.infinite, painter: BloomPainter(seedOf(t.path), .5 + .45 * m.min(1.0, n / 20), 0, bloomBase(), tier: rareTier(n))))),
-                    Padding(padding: const EdgeInsets.fromLTRB(6, 0, 6, 8), child: Column(children: [
-                      Text(t.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.w600, fontSize: cols == 2 ? 15 : 12)),
-                      Text(cols == 2 ? '${bloomStage(n)} · $n plays' : cols == 3 ? '${bloomStage(n)} · $n' : '$n×',
-                          maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: cols == 2 ? 12 : 10))])),
-                  ])));
-            })),
-      ]);
-    }));
   }
 }
 
@@ -1134,13 +1065,6 @@ class SettingsPage extends StatelessWidget {
           onChanged: (v) async { showSig.value = v; HapticFeedback.selectionClick(); (await SharedPreferences.getInstance()).setBool('sig', v); })),
       _sw(adaptiveColors, 'adaptive', Icons.palette_outlined, 'Colors from album art', 'The accent color follows the cover of the song playing', updateArtAccent),
       _sw(vizOn, 'viz', Icons.equalizer_rounded, 'Visualizer', 'Moving bars on the player while music plays'),
-      _sw(seasonsOn, 'seasons', Icons.eco_outlined, 'Garden seasons', 'Your flowers take on the colors of the season'),
-      ValueListenableBuilder<int>(valueListenable: gardenCols, builder: (_, v, __) => ListTile(
-          leading: const Icon(Icons.local_florist_outlined), title: const Text('Garden flower size'),
-          subtitle: Padding(padding: const EdgeInsets.only(top: 8), child: Wrap(spacing: 8, children: [
-            for (final e in [[2, 'Large'], [3, 'Medium'], [4, 'Small']]) ChoiceChip(
-                label: Text(e[1] as String), selected: v == e[0],
-                onSelected: (_) async { gardenCols.value = e[0] as int; (await SharedPreferences.getInstance()).setInt('gcols', e[0] as int); })])))),
       ListenableBuilder(listenable: Listenable.merge([sigText, sigFont, sigSize]), builder: (ctx, _) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         ListTile(leading: const Icon(Icons.edit_outlined), title: const Text('Signature text'), subtitle: Text(sigText.value),
             onTap: () async {
@@ -1162,9 +1086,6 @@ class SettingsPage extends StatelessWidget {
           subtitle: const Text('Playlists, favorites, play counts and signature'), onTap: backupToClipboard),
       ListTile(leading: const Icon(Icons.restore_rounded), title: const Text('Restore from clipboard'),
           subtitle: const Text('Copy a Cadence backup first, then tap here'), onTap: restoreFromClipboard),
-      ListTile(leading: const Icon(Icons.auto_awesome_rounded), title: const Text('Music constellations'),
-          subtitle: const Text('Your songs as stars, grouped by artist'),
-          onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const SkyPage()))),
       ListTile(leading: const Icon(Icons.menu_book_rounded), title: const Text('Listening diary'),
           subtitle: const Text('A line for every day you listened'),
           onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const DiaryPage()))),
@@ -1601,7 +1522,7 @@ List<_Group> skyLayout() {
   return out;
 }
 
-class SkyPage extends StatefulWidget { const SkyPage({super.key}); @override State<SkyPage> createState() => _SkyS(); }
+class SkyPage extends StatefulWidget { final bool embedded; const SkyPage({super.key, this.embedded = false}); @override State<SkyPage> createState() => _SkyS(); }
 class _SkyS extends State<SkyPage> with SingleTickerProviderStateMixin {
   late final AnimationController an = AnimationController(vsync: this, duration: const Duration(seconds: 8))..repeat();
   final tc = TransformationController();
@@ -1630,13 +1551,21 @@ class _SkyS extends State<SkyPage> with SingleTickerProviderStateMixin {
   @override
   Widget build(BuildContext c) => Scaffold(
         backgroundColor: const Color(0xFF080C1A),
-        appBar: AppBar(title: const Text('Music constellations'), backgroundColor: Colors.transparent),
+        appBar: widget.embedded ? null : AppBar(title: const Text('Music constellations'), backgroundColor: Colors.transparent),
         body: groups.isEmpty
-            ? const Center(child: Text('No songs yet.', style: TextStyle(color: Colors.white70)))
-            : InteractiveViewer(transformationController: tc, constrained: false, minScale: .25, maxScale: 4, boundaryMargin: const EdgeInsets.all(300),
-                child: GestureDetector(onTapUp: (d) => _tap(d.localPosition),
-                    child: SizedBox(width: kSky, height: kSky, child: AnimatedBuilder(animation: an,
-                        builder: (_, __) => CustomPaint(painter: _SkyP(groups, an.value, th.ac)))))),
+            ? const Center(child: Text('Add some songs and your sky will appear.', style: TextStyle(color: Colors.white70)))
+            : Stack(children: [
+                InteractiveViewer(transformationController: tc, constrained: false, minScale: .25, maxScale: 4, boundaryMargin: const EdgeInsets.all(300),
+                    child: GestureDetector(onTapUp: (d) => _tap(d.localPosition),
+                        child: SizedBox(width: kSky, height: kSky, child: AnimatedBuilder(animation: an,
+                            builder: (_, __) => CustomPaint(painter: _SkyP(groups, an.value, th.ac)))))),
+                if (widget.embedded) IgnorePointer(child: SafeArea(child: Padding(padding: const EdgeInsets.fromLTRB(22, 14, 22, 0),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      const Text('Sky', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w300, color: Colors.white)),
+                      Text('${lib.tracks.length} songs · ${groups.length} constellations · tap a star to play',
+                          style: const TextStyle(fontSize: 12, color: Colors.white54)),
+                    ])))),
+              ]),
       );
 }
 
@@ -1645,6 +1574,15 @@ class _SkyP extends CustomPainter {
   _SkyP(this.groups, this.t, this.ac);
   @override
   void paint(Canvas cv, Size sz) {
+    final rect = Offset.zero & sz;
+    cv.drawRect(rect, Paint()..shader = RadialGradient(center: const Alignment(-.4, -.5), radius: .9, colors: [ac.withOpacity(.22), Colors.transparent]).createShader(rect));
+    cv.drawRect(rect, Paint()..shader = RadialGradient(center: const Alignment(.6, .5), radius: .8, colors: [const Color(0xFF6A4BC4).withOpacity(.18), Colors.transparent]).createShader(rect));
+    if (t < .1) {
+      final p = t / .1;
+      final a = Offset(sz.width * .8, sz.height * .15), b = Offset(sz.width * .3, sz.height * .45);
+      final head = Offset.lerp(a, b, p)!, tail = Offset.lerp(a, b, m.max(0.0, p - .25))!;
+      cv.drawLine(tail, head, Paint()..color = Colors.white.withOpacity(1 - p)..strokeWidth = 2..strokeCap = StrokeCap.round);
+    }
     final bg = Paint()..color = Colors.white.withOpacity(.25);
     for (final p in _bgStars) { cv.drawCircle(p, .9, bg); }
     final line = Paint()..style = PaintingStyle.stroke..strokeWidth = 1..color = ac.withOpacity(.4);
