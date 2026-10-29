@@ -282,7 +282,7 @@ void _diagOnce() {
     try {
       final n = await Permission.notification.status;
       final b = await Permission.ignoreBatteryOptimizations.isGranted;
-      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 14');
+      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 17');
     } catch (_) {}
   });
 }
@@ -440,7 +440,7 @@ class _SplashS extends State<Splash> with SingleTickerProviderStateMixin {
           const SizedBox(height: 8),
           Text('DEEP, BLUE AND MIST', style: TextStyle(fontSize: 12, letterSpacing: 5, color: th.tx.withOpacity(.6))),
           const SizedBox(height: 10),
-          Text('build 14', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
+          Text('build 17', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
           const SizedBox(height: 26),
           SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: th.ac)),
         ])))));
@@ -486,7 +486,7 @@ class _HomeS extends State<Home> with WidgetsBindingObserver {
           duration: const Duration(milliseconds: 350),
           transitionBuilder: (w, a) => FadeTransition(opacity: a,
               child: SlideTransition(position: Tween(begin: const Offset(.04, 0), end: Offset.zero).animate(a), child: w)),
-          child: KeyedSubtree(key: ValueKey(i), child: [const LibraryPage(), const SkyPage(embedded: true), const EqPage(), const SettingsPage()][i])),
+          child: KeyedSubtree(key: ValueKey(i), child: [const LibraryPage(), const MixesTab(), const EqPage(), const SettingsPage()][i])),
       bottomNavigationBar: ClipRect(child: BackdropFilter(
           filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -495,7 +495,7 @@ class _HomeS extends State<Home> with WidgetsBindingObserver {
                 onDestinationSelected: (v) { HapticFeedback.selectionClick(); setState(() => i = v); },
                 destinations: const [
                   NavigationDestination(icon: Icon(Icons.library_music_outlined), selectedIcon: Icon(Icons.library_music), label: 'Library'),
-                  NavigationDestination(icon: Icon(Icons.auto_awesome_outlined), selectedIcon: Icon(Icons.auto_awesome), label: 'Sky'),
+                  NavigationDestination(icon: Icon(Icons.queue_music_outlined), selectedIcon: Icon(Icons.queue_music), label: 'Mixes'),
                   NavigationDestination(icon: Icon(Icons.equalizer_rounded), label: 'Equalizer'),
                   NavigationDestination(icon: Icon(Icons.tune_rounded), label: 'Settings'),
                 ]),
@@ -1491,115 +1491,115 @@ Future<void> checkCapsules() async {
   }
 }
 
-// ---------------- Music constellations ----------------
-const kSky = 2100.0;
-class _Star { final Offset p; final Track t; final double r; const _Star(this.p, this.t, this.r); }
-class _Group {
-  final String name; final Offset c; final List<_Star> stars; final TextPainter tp;
-  _Group(this.name, this.c, this.stars, this.tp);
+// ---------------- Mixes ----------------
+class Mix {
+  final String name, sub; final IconData icon; final List<Track> tracks; final bool ordered;
+  Mix(this.name, this.sub, this.icon, this.tracks, this.ordered);
+  List<Track> toPlay() => ordered ? tracks : ([...tracks]..shuffle());
 }
-final _bgStars = List<Offset>.generate(220, (i) { final r = m.Random(i); return Offset(r.nextDouble() * kSky, r.nextDouble() * kSky); });
 
-List<_Group> skyLayout() {
-  final g = <String, List<Track>>{};
-  for (final t in lib.tracks) { (g[t.artist] ??= []).add(t); }
-  int score(List<Track> l) => l.fold<int>(0, (a, t) => a + 1 + (lib.plays[t.path] ?? 0));
-  final keys = g.keys.toList()..sort((a, b) => score(g[b]!).compareTo(score(g[a]!)));
-  final out = <_Group>[];
-  for (int k = 0; k < keys.length && k < 40; k++) {
-    final name = keys[k], l = g[name]!;
-    final a = k * 2.399963 + .5, rr = 140.0 * m.sqrt(k + .5);
-    final c = Offset(kSky / 2 + rr * m.cos(a), kSky / 2 + rr * m.sin(a));
-    final stars = <_Star>[];
-    for (int j = 0; j < l.length && j < 24; j++) {
-      final ang = j * 2.4 + (seedOf(name) % 7), rad = 24.0 + 13 * m.sqrt(j.toDouble());
-      stars.add(_Star(c + Offset(m.cos(ang), m.sin(ang)) * rad, l[j], 2.5 + 5 * m.min(1.0, (lib.plays[l[j].path] ?? 0) / 30)));
-    }
-    final tp = TextPainter(text: TextSpan(text: name, style: TextStyle(color: Colors.white.withOpacity(.6), fontSize: 14)),
-        textDirection: TextDirection.ltr, maxLines: 1, ellipsis: '…')..layout(maxWidth: 170);
-    out.add(_Group(name, c, stars, tp));
+List<Color> mixColors(String name) {
+  final h = (seedOf(name) % 360).toDouble();
+  return [HSLColor.fromAHSL(1, h, .5, .42).toColor(), HSLColor.fromAHSL(1, (h + 45) % 360, .55, .26).toColor()];
+}
+
+List<Mix> buildMixes(List<String> rec) {
+  final all = lib.tracks;
+  if (all.isEmpty) return [];
+  int pl(Track t) => lib.plays[t.path] ?? 0;
+  final out = <Mix>[];
+  void add(String n, String sub, IconData ic, List<Track> l, {bool ordered = false}) {
+    if (l.length >= 3) out.add(Mix(n, sub, ic, l, ordered));
   }
+  final played = all.where((t) => pl(t) > 0).toList()..sort((a, b) => pl(b).compareTo(pl(a)));
+  add('Heavy rotation', 'What you play the most', Icons.local_fire_department_rounded, played.take(30).toList(), ordered: true);
+  final recentSet = rec.take(15).toSet();
+  add('Forgotten favorites', 'Loved songs you have not heard lately', Icons.history_toggle_off_rounded,
+      [for (final t in all) if (lib.favs.contains(t.path) && !recentSet.contains(t.path)) t]);
+  add('Fresh finds', 'Songs you have never played', Icons.explore_rounded, ([for (final t in all) if (pl(t) == 0) t]..shuffle()).take(40).toList());
+  final newest = [...all]..sort((a, b) => b.added.compareTo(a.added));
+  add('Recently added', 'Your newest songs', Icons.fiber_new_rounded, newest.take(30).toList(), ordered: true);
+  add('Quick listens', 'Under three minutes', Icons.bolt_rounded, ([for (final t in all) if (t.dur > 0 && t.dur < 180000) t]..shuffle()).take(40).toList());
+  add('Long journeys', 'Over six minutes', Icons.landscape_rounded, [for (final t in all) if (t.dur > 360000) t]);
+  add('Lossless', 'Your highest quality files', Icons.diamond_outlined, ([for (final t in all) if (t.lossless == true) t]..shuffle()).take(40).toList());
+  final byArtist = <String, List<Track>>{};
+  for (final t in all) { if (!t.artist.startsWith('Unknown')) (byArtist[t.artist] ??= []).add(t); }
+  final artists = byArtist.entries.where((e) => e.value.length >= 3).toList()..sort((a, b) => b.value.length.compareTo(a.value.length));
+  for (final e in artists.take(6)) { add('More ${e.key}', '${e.value.length} songs', Icons.person_rounded, e.value); }
+  add('Everything', 'All your songs, shuffled', Icons.all_inclusive_rounded, [...all]);
   return out;
 }
 
-class SkyPage extends StatefulWidget { final bool embedded; const SkyPage({super.key, this.embedded = false}); @override State<SkyPage> createState() => _SkyS(); }
-class _SkyS extends State<SkyPage> with SingleTickerProviderStateMixin {
-  late final AnimationController an = AnimationController(vsync: this, duration: const Duration(seconds: 8))..repeat();
-  final tc = TransformationController();
-  late final List<_Group> groups = skyLayout();
+class MixesTab extends StatelessWidget {
+  const MixesTab({super.key});
   @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      final sz = MediaQuery.sizeOf(context);
-      tc.value = Matrix4.translationValues(-(kSky - sz.width) / 2, -(kSky - sz.height) / 2, 0);
-    });
+  Widget build(BuildContext c) {
+    Theme.of(c);
+    return ListenableBuilder(listenable: lib, builder: (_, __) => ValueListenableBuilder<List<String>>(valueListenable: recents, builder: (_, rec, __) {
+      final mixes = buildMixes(rec);
+      return ListView(padding: const EdgeInsets.fromLTRB(20, 20, 20, 24), children: [
+        const Text('Mixes', style: TextStyle(fontSize: 34, fontWeight: FontWeight.w300)),
+        const SizedBox(height: 4),
+        Text('Made from your own library', style: TextStyle(color: th.tx.withOpacity(.6))),
+        const SizedBox(height: 18),
+        if (mixes.isEmpty) const Padding(padding: EdgeInsets.all(32), child: Text('Add some songs and your mixes will appear here.', textAlign: TextAlign.center))
+        else GridView.count(shrinkWrap: true, physics: const NeverScrollableScrollPhysics(), crossAxisCount: 2,
+            mainAxisSpacing: 12, crossAxisSpacing: 12, childAspectRatio: 1.0,
+            children: [for (final x in mixes) _card(c, x)]),
+      ]);
+    }));
   }
-  @override
-  void dispose() { an.dispose(); tc.dispose(); super.dispose(); }
-  void _tap(Offset p) {
-    _Star? best; var bd = 30.0;
-    for (final g in groups) {
-      for (final s in g.stars) {
-        final d = (s.p - p).distance;
-        if (d < bd) { bd = d; best = s; }
-      }
-    }
-    if (best != null) { snack('${best.t.title} · ${best.t.artist}'); playList([best.t], 0); }
+
+  Widget _card(BuildContext c, Mix x) {
+    final cols = mixColors(x.name);
+    return GestureDetector(
+      onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => MixPage(x))),
+      child: Container(padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(borderRadius: BorderRadius.circular(26),
+              gradient: LinearGradient(colors: cols, begin: Alignment.topLeft, end: Alignment.bottomRight)),
+          child: Stack(children: [
+            Icon(x.icon, size: 30, color: Colors.white.withOpacity(.85)),
+            Positioned(left: 0, right: 0, bottom: 0, child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+              Text(x.name, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600)),
+              const SizedBox(height: 2),
+              Text('${x.tracks.length} songs', style: TextStyle(color: Colors.white.withOpacity(.75), fontSize: 12)),
+            ])),
+            Positioned(right: 0, top: 0, child: GestureDetector(
+                onTap: () { HapticFeedback.selectionClick(); playList(x.toPlay(), 0); },
+                child: Container(width: 38, height: 38, decoration: BoxDecoration(color: Colors.white.withOpacity(.22), shape: BoxShape.circle),
+                    child: const Icon(Icons.play_arrow_rounded, color: Colors.white)))),
+          ])),
+    );
   }
-  @override
-  Widget build(BuildContext c) => Scaffold(
-        backgroundColor: const Color(0xFF080C1A),
-        appBar: widget.embedded ? null : AppBar(title: const Text('Music constellations'), backgroundColor: Colors.transparent),
-        body: groups.isEmpty
-            ? const Center(child: Text('Add some songs and your sky will appear.', style: TextStyle(color: Colors.white70)))
-            : Stack(children: [
-                InteractiveViewer(transformationController: tc, constrained: false, minScale: .25, maxScale: 4, boundaryMargin: const EdgeInsets.all(300),
-                    child: GestureDetector(onTapUp: (d) => _tap(d.localPosition),
-                        child: SizedBox(width: kSky, height: kSky, child: AnimatedBuilder(animation: an,
-                            builder: (_, __) => CustomPaint(painter: _SkyP(groups, an.value, th.ac)))))),
-                if (widget.embedded) IgnorePointer(child: SafeArea(child: Padding(padding: const EdgeInsets.fromLTRB(22, 14, 22, 0),
-                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      const Text('Sky', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w300, color: Colors.white)),
-                      Text('${lib.tracks.length} songs · ${groups.length} constellations · tap a star to play',
-                          style: const TextStyle(fontSize: 12, color: Colors.white54)),
-                    ])))),
-              ]),
-      );
 }
 
-class _SkyP extends CustomPainter {
-  final List<_Group> groups; final double t; final Color ac;
-  _SkyP(this.groups, this.t, this.ac);
+class MixPage extends StatelessWidget {
+  final Mix x;
+  const MixPage(this.x, {super.key});
   @override
-  void paint(Canvas cv, Size sz) {
-    final rect = Offset.zero & sz;
-    cv.drawRect(rect, Paint()..shader = RadialGradient(center: const Alignment(-.4, -.5), radius: .9, colors: [ac.withOpacity(.22), Colors.transparent]).createShader(rect));
-    cv.drawRect(rect, Paint()..shader = RadialGradient(center: const Alignment(.6, .5), radius: .8, colors: [const Color(0xFF6A4BC4).withOpacity(.18), Colors.transparent]).createShader(rect));
-    if (t < .1) {
-      final p = t / .1;
-      final a = Offset(sz.width * .8, sz.height * .15), b = Offset(sz.width * .3, sz.height * .45);
-      final head = Offset.lerp(a, b, p)!, tail = Offset.lerp(a, b, m.max(0.0, p - .25))!;
-      cv.drawLine(tail, head, Paint()..color = Colors.white.withOpacity(1 - p)..strokeWidth = 2..strokeCap = StrokeCap.round);
-    }
-    final bg = Paint()..color = Colors.white.withOpacity(.25);
-    for (final p in _bgStars) { cv.drawCircle(p, .9, bg); }
-    final line = Paint()..style = PaintingStyle.stroke..strokeWidth = 1..color = ac.withOpacity(.4);
-    var gi = 0;
-    for (final g in groups) {
-      for (int j = 1; j < g.stars.length; j++) { cv.drawLine(g.stars[j - 1].p, g.stars[j].p, line); }
-      for (int j = 0; j < g.stars.length; j++) {
-        final s = g.stars[j];
-        final tw = .65 + .35 * m.sin(t * 6.2832 + j + gi);
-        cv.drawCircle(s.p, s.r * 2.4, Paint()..color = ac.withOpacity(.14 * tw));
-        cv.drawCircle(s.p, s.r, Paint()..color = Colors.white.withOpacity(tw));
-      }
-      final rad = 24.0 + 13 * m.sqrt(g.stars.length.toDouble());
-      g.tp.paint(cv, Offset(g.c.dx - g.tp.width / 2, g.c.dy + rad + 6));
-      gi++;
-    }
+  Widget build(BuildContext c) {
+    Theme.of(c);
+    final cols = mixColors(x.name);
+    return Scaffold(
+      appBar: AppBar(title: Text(x.name), backgroundColor: Colors.transparent),
+      body: ListView(padding: const EdgeInsets.only(bottom: 24), children: [
+        Container(margin: const EdgeInsets.fromLTRB(16, 4, 16, 8), padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(borderRadius: BorderRadius.circular(24), gradient: LinearGradient(colors: cols, begin: Alignment.topLeft, end: Alignment.bottomRight)),
+            child: Row(children: [
+              Icon(x.icon, size: 36, color: Colors.white),
+              const SizedBox(width: 14),
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(x.sub, style: const TextStyle(color: Colors.white, fontSize: 15)),
+                Text('${x.tracks.length} songs', style: TextStyle(color: Colors.white.withOpacity(.75), fontSize: 12)),
+              ])),
+              IconButton.filled(onPressed: () => playList(x.toPlay(), 0), icon: const Icon(Icons.play_arrow_rounded)),
+            ])),
+        for (int i = 0; i < x.tracks.length; i++) ListTile(
+            leading: Art(x.tracks[i], 46, 10),
+            title: Text(x.tracks[i].title, maxLines: 1, overflow: TextOverflow.ellipsis),
+            subtitle: Text(x.tracks[i].artist, maxLines: 1, overflow: TextOverflow.ellipsis),
+            onTap: () => playList(x.tracks, i)),
+      ]),
+    );
   }
-  @override
-  bool shouldRepaint(covariant _SkyP o) => true;
 }

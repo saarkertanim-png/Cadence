@@ -159,6 +159,20 @@ class Lib extends ChangeNotifier {
     return ['/storage/emulated/0', imp];
   }
 
+  // Call recordings, voice recordings, voice notes, ringtones and other non-music sounds.
+  static bool _notMusic(String path) {
+    final l = path.toLowerCase().replaceAll('\\', '/');
+    const dirs = ['/call/', '/calls/', '/call recordings/', '/callrecordings/', '/call_recordings/', '/recordings/',
+      '/voice recorder/', '/voicerecorder/', '/sound recorder/', '/soundrecorder/', '/voice recordings/', '/voice notes/',
+      '/whatsapp/', '/telegram/', '/notifications/', '/ringtones/', '/alarms/', '/callrecorder/'];
+    for (final d in dirs) { if (l.contains(d)) return true; }
+    final name = l.substring(l.lastIndexOf('/') + 1);
+    const pre = ['call recording', 'call_recording', 'callrecording', 'new recording', 'aud-', 'ptt-'];
+    for (final x in pre) { if (name.startsWith(x)) return true; }
+    if (RegExp(r'^(voice|recording|record|rec|call)[ _\-]?\d').hasMatch(name)) return true;
+    return name.endsWith('.amr') || name.endsWith('.3gp') || name.endsWith('.awb');
+  }
+
   Future<void> scan() async {
     if (scanning) return;
     scanning = true; found = 0; msg = null;
@@ -171,7 +185,7 @@ class Lib extends ChangeNotifier {
         if (e is! File) continue;
         final p = e.path, i = p.lastIndexOf('.');
         if (p.contains('/Android/') || p.contains('/.') || i < 0) continue;
-        if (exts.contains(p.substring(i + 1).toLowerCase())) paths.add(p);
+        if (exts.contains(p.substring(i + 1).toLowerCase()) && !_notMusic(p)) paths.add(p);
       }
     }
     final old = {for (final t in tracks) t.path: t};
@@ -182,6 +196,7 @@ class Lib extends ChangeNotifier {
       if (t == null || t.size != File(p).lengthSync()) {
         try { t = Track(await Isolate.run(() => readOne([p, ad]))); } catch (_) { continue; }
       }
+      if (t.dur > 0 && t.dur < 15000) continue;
       out.add(t);
       if (out.length % 8 == 0) { found = out.length; tracks = [...out]; _idx(); notifyListeners(); }
     }
