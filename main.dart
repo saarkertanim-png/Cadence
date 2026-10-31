@@ -196,6 +196,24 @@ Future<String?> askText(BuildContext c, String title, String init, {bool number 
 }
 final glassSkin = ValueNotifier<bool>(true);
 final skin = ValueNotifier<int>(0);
+final fx = ValueNotifier<int>(0);
+const fxNames = ['Off', 'Sakura petals', 'Neon rain', 'Snow', 'Sparkles', 'Fireflies', 'Film grain'];
+// name, theme index, card style, effect
+const looks = [
+  ['Sakura dream', 7, 2, 1], ['Moonlit anime', 11, 2, 4], ['Magical girl', 10, 2, 4],
+  ['Neon city', 23, 1, 2], ['Mecha grid', 12, 1, 4], ['Cartoon morning', 15, 3, 4],
+  ['Cheese chase', 14, 3, 4], ['Movie night', 19, 4, 6], ['Noir', 18, 4, 6],
+  ['Winter glass', 1, 0, 3], ['Forest night', 6, 0, 5],
+];
+Future<void> applyLook(int t, int sk, int f) async {
+  autoTheme.value = false;
+  themeIx.value = t; skin.value = sk; fx.value = f;
+  final sp = await SharedPreferences.getInstance();
+  await sp.setBool('auto', false);
+  await sp.setInt('theme', t);
+  await sp.setInt('skin', sk);
+  await sp.setInt('fx', f);
+}
 const skinNames = ['Liquid glass', 'Cyberpunk', 'Anime', 'Cartoon', 'Cinema'];
 final matchWall = ValueNotifier<bool>(false);
 final wallAccent = ValueNotifier<Color?>(null);
@@ -254,6 +272,7 @@ Future<void> main() async {
   wallpaperPath.value = sp.getString('wall');
   wallDim.value = sp.getDouble('wallDim') ?? .45;
   skin.value = sp.getInt('skin') ?? 0;
+  fx.value = sp.getInt('fx') ?? 0;
   matchWall.value = sp.getBool('matchWall') ?? false;
   updateWallAccent();
   adaptiveColors.value = sp.getBool('adaptive') ?? false;
@@ -341,7 +360,7 @@ void _diagOnce() {
     try {
       final n = await Permission.notification.status;
       final b = await Permission.ignoreBatteryOptimizations.isGranted;
-      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 19');
+      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 20');
     } catch (_) {}
   });
 }
@@ -465,6 +484,7 @@ class CadenceApp extends StatelessWidget {
             const Positioned.fill(child: WallLayer()),
             Positioned(top: -90, left: -80, child: _blob(t.ac, 300)),
             Positioned(bottom: 120, right: -120, child: _blob(t.bg2, 340)),
+            const Positioned.fill(child: FxLayer()),
             child!,
           ]),
           home: const Splash(),
@@ -472,6 +492,93 @@ class CadenceApp extends StatelessWidget {
       });
   Widget _blob(Color c, double s) => IgnorePointer(child: Container(width: s, height: s,
       decoration: BoxDecoration(shape: BoxShape.circle, gradient: RadialGradient(colors: [c.withOpacity(.25), Colors.transparent]))));
+}
+
+double _h(int i, int k) {
+  final x = m.sin(i * 12.9898 + k * 78.233) * 43758.5453;
+  return x - x.floorToDouble();
+}
+
+class FxLayer extends StatefulWidget { const FxLayer({super.key}); @override State<FxLayer> createState() => _FxS(); }
+class _FxS extends State<FxLayer> with SingleTickerProviderStateMixin {
+  late final AnimationController c = AnimationController(vsync: this, duration: const Duration(seconds: 120))..repeat();
+  @override
+  void dispose() { c.dispose(); super.dispose(); }
+  @override
+  Widget build(BuildContext ctx) => ValueListenableBuilder<int>(valueListenable: fx, builder: (_, k, __) => k == 0
+      ? const SizedBox.shrink()
+      : IgnorePointer(child: AnimatedBuilder(animation: c, builder: (_, __) =>
+          CustomPaint(size: Size.infinite, painter: _FxP(k, c.value * 120, th.ac)))));
+}
+
+class _FxP extends CustomPainter {
+  final int k; final double t; final Color ac;
+  _FxP(this.k, this.t, this.ac);
+  @override
+  void paint(Canvas c, Size s) {
+    final w = s.width, h = s.height;
+    if (w <= 0 || h <= 0) return;
+    if (k == 1) {
+      final p = Paint()..color = const Color(0xFFF8B4D0).withOpacity(.8);
+      for (int i = 0; i < 28; i++) {
+        final sp = 30 + _h(i, 2) * 40;
+        final y = ((t * sp + _h(i, 3) * h) % (h + 40)) - 20;
+        final x = _h(i, 1) * w + 25 * m.sin(t * .8 + i);
+        c.save();
+        c.translate(x, y);
+        c.rotate(t * (.5 + _h(i, 4)) + i);
+        c.drawOval(Rect.fromCenter(center: Offset.zero, width: 11, height: 6), p);
+        c.restore();
+      }
+    } else if (k == 2) {
+      final p = Paint()..color = ac.withOpacity(.4)..strokeWidth = 1.2..strokeCap = StrokeCap.round;
+      for (int i = 0; i < 60; i++) {
+        final sp = 500 + _h(i, 2) * 400;
+        final y = ((t * sp + _h(i, 3) * h) % (h + 60)) - 30;
+        final x = _h(i, 1) * w;
+        c.drawLine(Offset(x, y), Offset(x - 4, y + 22), p);
+      }
+    } else if (k == 3) {
+      final p = Paint()..color = Colors.white.withOpacity(.75);
+      for (int i = 0; i < 50; i++) {
+        final sp = 25 + _h(i, 2) * 40;
+        final y = ((t * sp + _h(i, 3) * h) % (h + 20)) - 10;
+        final x = _h(i, 1) * w + 18 * m.sin(t * .6 + i);
+        c.drawCircle(Offset(x, y), 1.2 + _h(i, 4) * 2.2, p);
+      }
+    } else if (k == 4) {
+      for (int i = 0; i < 30; i++) {
+        final tw = (m.sin(t * 1.5 + i * 3) + 1) / 2;
+        final sz = 3 + _h(i, 3) * 6;
+        final o = Offset(_h(i, 1) * w, _h(i, 2) * h);
+        final p = Paint()..color = (i % 3 == 0 ? ac : Colors.white).withOpacity(.85 * tw)..strokeWidth = 1.2..strokeCap = StrokeCap.round;
+        c.drawLine(o + Offset(-sz, 0), o + Offset(sz, 0), p);
+        c.drawLine(o + Offset(0, -sz), o + Offset(0, sz), p);
+        c.drawCircle(o, 1.3, p);
+      }
+    } else if (k == 5) {
+      for (int i = 0; i < 22; i++) {
+        final o = Offset(_h(i, 1) * w + 40 * m.sin(t * .3 + i * 2), _h(i, 2) * h + 40 * m.cos(t * .25 + i));
+        final pulse = .5 + .5 * m.sin(t * 1.2 + i);
+        c.drawCircle(o, 11, Paint()..color = const Color(0xFFFFE08A).withOpacity(.16 * pulse));
+        c.drawCircle(o, 2, Paint()..color = const Color(0xFFFFF3C4).withOpacity(.4 + .5 * pulse));
+      }
+    } else if (k == 6) {
+      final frame = (t * 8).floor();
+      final p = Paint()..color = Colors.white.withOpacity(.14);
+      final q = Paint()..color = Colors.black.withOpacity(.2);
+      for (int i = 0; i < 140; i++) {
+        final o = Offset(_h(i, frame) * w, _h(i, frame + 500) * h);
+        c.drawRect(Rect.fromLTWH(o.dx, o.dy, 1.6, 1.6), i.isEven ? p : q);
+      }
+      if (_h(frame, 9) > .85) {
+        final x = _h(frame, 10) * w;
+        c.drawLine(Offset(x, 0), Offset(x, h), Paint()..color = Colors.white.withOpacity(.16)..strokeWidth = 1);
+      }
+    }
+  }
+  @override
+  bool shouldRepaint(covariant _FxP o) => true;
 }
 
 class WallLayer extends StatelessWidget {
@@ -622,7 +729,7 @@ class _SplashS extends State<Splash> with SingleTickerProviderStateMixin {
           const SizedBox(height: 8),
           Text('DEEP, BLUE AND MIST', style: TextStyle(fontSize: 12, letterSpacing: 5, color: th.tx.withOpacity(.6))),
           const SizedBox(height: 10),
-          Text('build 19', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
+          Text('build 20', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
           const SizedBox(height: 26),
           SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: th.ac)),
         ])))));
@@ -1233,6 +1340,15 @@ class SettingsPage extends StatelessWidget {
     Theme.of(c);
     return SafeArea(bottom: false, child: ListView(padding: const EdgeInsets.all(20), children: [
       const Text('Settings', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w300)), const SizedBox(height: 16),
+      const Text('Looks', style: TextStyle(fontWeight: FontWeight.w600)), const SizedBox(height: 4),
+      Text('One tap sets theme, card style and effect together', style: TextStyle(fontSize: 12, color: th.tx.withOpacity(.6))),
+      const SizedBox(height: 10),
+      Wrap(spacing: 8, runSpacing: 8, children: [
+        for (final l in looks) ActionChip(
+            avatar: CircleAvatar(radius: 7, backgroundColor: themes[l[1] as int].ac),
+            label: Text(l[0] as String),
+            onPressed: () { HapticFeedback.selectionClick(); applyLook(l[1] as int, l[2] as int, l[3] as int); })]),
+      const SizedBox(height: 18),
       const Text('Theme', style: TextStyle(fontWeight: FontWeight.w600)), const SizedBox(height: 10),
       Wrap(spacing: 10, runSpacing: 10, children: [for (int i = 0; i < themes.length; i++) GestureDetector(
           onTap: () async { autoTheme.value = false; themeIx.value = i; HapticFeedback.selectionClick(); final sp = await SharedPreferences.getInstance(); await sp.setInt('theme', i); await sp.setBool('auto', false); },
@@ -1257,6 +1373,12 @@ class SettingsPage extends StatelessWidget {
           subtitle: Padding(padding: const EdgeInsets.only(top: 8), child: Wrap(spacing: 8, runSpacing: 6, children: [
             for (int i = 0; i < skinNames.length; i++) ChoiceChip(label: Text(skinNames[i]), selected: v == i,
                 onSelected: (_) async { skin.value = i; HapticFeedback.selectionClick(); (await SharedPreferences.getInstance()).setInt('skin', i); })]))),
+      ),
+      ValueListenableBuilder<int>(valueListenable: fx, builder: (_, v, __) => ListTile(
+          leading: const Icon(Icons.auto_awesome_rounded), title: const Text('Ambient effect'),
+          subtitle: Padding(padding: const EdgeInsets.only(top: 8), child: Wrap(spacing: 8, runSpacing: 6, children: [
+            for (int i = 0; i < fxNames.length; i++) ChoiceChip(label: Text(fxNames[i]), selected: v == i,
+                onSelected: (_) async { fx.value = i; HapticFeedback.selectionClick(); (await SharedPreferences.getInstance()).setInt('fx', i); })]))),
       ),
       ValueListenableBuilder<String?>(valueListenable: wallpaperPath, builder: (_, p, __) => Column(children: [
         ListTile(leading: const Icon(Icons.wallpaper_rounded), title: const Text('Custom wallpaper'),
