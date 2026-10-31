@@ -118,8 +118,9 @@ Future<void> restoreFromClipboard() async {
   } catch (_) { snack('Could not read that backup.'); }
 }
 Th themeAt(int i) {
-  final b = themes[i], a = artAccent.value;
-  if (!adaptiveColors.value || a == null) return b;
+  final b = themes[i];
+  final a = (matchWall.value && wallAccent.value != null) ? wallAccent.value : (adaptiveColors.value ? artAccent.value : null);
+  if (a == null) return b;
   return Th(b.n, b.bg, Color.lerp(b.bg2, a, .5)!, a, b.tx, b.dark);
 }
 Th get th => themeAt(themeIx.value);
@@ -194,6 +195,14 @@ Future<String?> askText(BuildContext c, String title, String init, {bool number 
         FilledButton(onPressed: () => Navigator.pop(d, tc.text), child: const Text('Save'))]));
 }
 final glassSkin = ValueNotifier<bool>(true);
+final skin = ValueNotifier<int>(0);
+const skinNames = ['Liquid glass', 'Cyberpunk', 'Anime', 'Cartoon', 'Cinema'];
+final matchWall = ValueNotifier<bool>(false);
+final wallAccent = ValueNotifier<Color?>(null);
+Future<void> updateWallAccent() async {
+  final p = wallpaperPath.value;
+  wallAccent.value = (matchWall.value && p != null) ? await dominantColor(p) : null;
+}
 final wallpaperPath = ValueNotifier<String?>(null);
 final wallDim = ValueNotifier<double>(.45);
 Future<void> pickWallpaper() async {
@@ -206,12 +215,14 @@ Future<void> pickWallpaper() async {
     final old = wallpaperPath.value;
     wallpaperPath.value = dst;
     (await SharedPreferences.getInstance()).setString('wall', dst);
+    await updateWallAccent();
     if (old != null) { try { await File(old).delete(); } catch (_) {} }
   } catch (_) { snack('Could not use that picture.'); }
 }
 Future<void> clearWallpaper() async {
   final old = wallpaperPath.value;
   wallpaperPath.value = null;
+  wallAccent.value = null;
   (await SharedPreferences.getInstance()).remove('wall');
   if (old != null) { try { await File(old).delete(); } catch (_) {} }
 }
@@ -242,6 +253,9 @@ Future<void> main() async {
   glassSkin.value = sp.getBool('glass') ?? true;
   wallpaperPath.value = sp.getString('wall');
   wallDim.value = sp.getDouble('wallDim') ?? .45;
+  skin.value = sp.getInt('skin') ?? 0;
+  matchWall.value = sp.getBool('matchWall') ?? false;
+  updateWallAccent();
   adaptiveColors.value = sp.getBool('adaptive') ?? false;
   vizOn.value = sp.getBool('viz') ?? true;
   try {
@@ -327,7 +341,7 @@ void _diagOnce() {
     try {
       final n = await Permission.notification.status;
       final b = await Permission.ignoreBatteryOptimizations.isGranted;
-      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 18');
+      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 19');
     } catch (_) {}
   });
 }
@@ -433,7 +447,7 @@ class CadenceApp extends StatelessWidget {
   const CadenceApp({super.key});
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-      listenable: Listenable.merge([themeIx, artAccent, adaptiveColors]),
+      listenable: Listenable.merge([themeIx, artAccent, adaptiveColors, wallAccent, matchWall]),
       builder: (_, __) {
         final t = th;
         final cs = ColorScheme.fromSeed(seedColor: t.ac, brightness: t.dark ? Brightness.dark : Brightness.light)
@@ -475,24 +489,113 @@ class WallLayer extends StatelessWidget {
       });
 }
 
-class GlassBox extends StatelessWidget {
-  final Widget child; final double radius;
-  const GlassBox({super.key, required this.child, this.radius = 30});
+class _RimPainter extends CustomPainter {
+  final double r; final bool dark;
+  _RimPainter(this.r, this.dark);
   @override
-  Widget build(BuildContext c) {
-    final r = BorderRadius.circular(radius), d = th.dark;
-    return Container(
-        decoration: BoxDecoration(borderRadius: r, boxShadow: [BoxShadow(color: Colors.black.withOpacity(d ? .35 : .15), blurRadius: 26, offset: const Offset(0, 10))]),
-        child: ClipRRect(borderRadius: r, child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 28, sigmaY: 28),
-            child: Container(
-                decoration: BoxDecoration(borderRadius: r,
-                    gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight,
-                        colors: [Colors.white.withOpacity(d ? .18 : .6), Colors.white.withOpacity(d ? .05 : .22)]),
-                    border: Border.all(color: Colors.white.withOpacity(d ? .25 : .75), width: 1)),
-                child: child))));
+  void paint(Canvas c, Size s) {
+    final rect = Offset.zero & s;
+    final rr = RRect.fromRectAndRadius(rect, Radius.circular(r)).deflate(.7);
+    c.drawRRect(rr, Paint()..style = PaintingStyle.stroke..strokeWidth = 1.4
+      ..shader = LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, stops: const [0, .3, .7, 1], colors: [
+        Colors.white.withOpacity(dark ? .6 : .95), Colors.white.withOpacity(.06), Colors.white.withOpacity(.06), Colors.white.withOpacity(dark ? .4 : .75)]).createShader(rect));
+    final hl = Rect.fromLTWH(r * .6, 1.2, s.width - r * 1.2, 1.4);
+    c.drawRect(hl, Paint()..shader = LinearGradient(colors: [Colors.white.withOpacity(0), Colors.white.withOpacity(dark ? .55 : .9), Colors.white.withOpacity(0)]).createShader(hl));
   }
+  @override
+  bool shouldRepaint(covariant _RimPainter o) => o.dark != dark || o.r != r;
 }
 
+class _ScanP extends CustomPainter {
+  final Color col;
+  _ScanP(this.col);
+  @override
+  void paint(Canvas c, Size s) {
+    final p = Paint()..color = col.withOpacity(.08)..strokeWidth = 1;
+    for (double y = 2; y < s.height; y += 4) { c.drawLine(Offset(0, y), Offset(s.width, y), p); }
+  }
+  @override
+  bool shouldRepaint(covariant _ScanP o) => o.col != col;
+}
+
+class _PerfP extends CustomPainter {
+  final Color col;
+  _PerfP(this.col);
+  @override
+  void paint(Canvas c, Size s) {
+    final p = Paint()..color = col.withOpacity(.5);
+    for (double x = 14; x < s.width - 14; x += 14) {
+      c.drawRRect(RRect.fromRectAndRadius(Rect.fromLTWH(x, 3, 6, 4), const Radius.circular(1.5)), p);
+      c.drawRRect(RRect.fromRectAndRadius(Rect.fromLTWH(x, s.height - 7, 6, 4), const Radius.circular(1.5)), p);
+    }
+  }
+  @override
+  bool shouldRepaint(covariant _PerfP o) => o.col != col;
+}
+
+// A floating "card" in the chosen skin: Liquid glass, Cyberpunk, Anime, Cartoon or Cinema.
+class GlassBox extends StatelessWidget {
+  final Widget child; final double radius; final Gradient? fill;
+  const GlassBox({super.key, required this.child, this.radius = 30, this.fill});
+  @override
+  Widget build(BuildContext c) => ValueListenableBuilder<int>(valueListenable: skin, builder: (_, k, __) {
+        final d = th.dark, ac = th.ac;
+        final r = BorderRadius.circular(radius);
+        if (k == 1) {
+          final shape = BeveledRectangleBorder(borderRadius: BorderRadius.circular(radius * .7), side: BorderSide(color: ac, width: 1.6));
+          final base = d ? const Color(0xF2080A16) : const Color(0xF2F6F4FF);
+          return Container(
+              decoration: ShapeDecoration(shape: shape, shadows: [BoxShadow(color: ac.withOpacity(.45), blurRadius: 20)]),
+              child: ClipPath(clipper: ShapeBorderClipper(shape: shape), child: Container(
+                  decoration: ShapeDecoration(shape: shape, gradient: fill ?? LinearGradient(colors: [base, Color.lerp(base, ac, .16)!], begin: Alignment.topLeft, end: Alignment.bottomRight)),
+                  child: Stack(fit: StackFit.passthrough, children: [child, Positioned.fill(child: IgnorePointer(child: CustomPaint(painter: _ScanP(ac))))]))));
+        }
+        if (k == 2) {
+          return Container(
+              decoration: BoxDecoration(borderRadius: r, boxShadow: [BoxShadow(color: ac.withOpacity(.35), blurRadius: 24, offset: const Offset(0, 10))]),
+              child: ClipRRect(borderRadius: r, child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+                  child: Container(
+                      decoration: BoxDecoration(borderRadius: r,
+                          gradient: fill ?? LinearGradient(colors: [Colors.white.withOpacity(d ? .2 : .75), ac.withOpacity(d ? .22 : .28)], begin: Alignment.topLeft, end: Alignment.bottomRight),
+                          border: Border.all(color: Colors.white.withOpacity(.9), width: 2.4)),
+                      child: Stack(fit: StackFit.passthrough, children: [
+                        child,
+                        Positioned(top: 5, right: 18, child: IgnorePointer(child: Text('✦', style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(.95))))),
+                        Positioned(bottom: 6, left: 22, child: IgnorePointer(child: Text('✧', style: TextStyle(fontSize: 10, color: Colors.white.withOpacity(.85))))),
+                        Positioned(top: 8, left: 14, child: IgnorePointer(child: Text('✦', style: TextStyle(fontSize: 7, color: Colors.white.withOpacity(.8))))),
+                      ])))));
+        }
+        if (k == 3) {
+          final line = d ? Colors.white : Colors.black;
+          final cr = BorderRadius.circular(radius * .8);
+          return Container(
+              decoration: BoxDecoration(borderRadius: cr, boxShadow: [BoxShadow(color: line, offset: const Offset(4, 5))]),
+              child: Container(
+                  decoration: BoxDecoration(borderRadius: cr, color: fill == null ? th.bg : null, gradient: fill, border: Border.all(color: line, width: 3)),
+                  child: ClipRRect(borderRadius: cr, child: child)));
+        }
+        if (k == 4) {
+          const gold = Color(0xFFE5B84B);
+          final base = d ? const Color(0xCC14100A) : const Color(0xE6FFF6E0);
+          return Container(
+              decoration: BoxDecoration(borderRadius: r, boxShadow: [BoxShadow(color: Colors.black.withOpacity(.4), blurRadius: 24, offset: const Offset(0, 10))]),
+              child: ClipRRect(borderRadius: r, child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+                  child: Container(
+                      decoration: BoxDecoration(borderRadius: r, gradient: fill ?? LinearGradient(colors: [base, Color.lerp(base, Colors.black, .35)!], begin: Alignment.topCenter, end: Alignment.bottomCenter),
+                          border: Border.all(color: gold.withOpacity(.85), width: 1.4)),
+                      child: Stack(fit: StackFit.passthrough, children: [child, Positioned.fill(child: IgnorePointer(child: CustomPaint(painter: _PerfP(gold))))])))));
+        }
+        // 0: Apple-style liquid glass
+        return Container(
+            decoration: BoxDecoration(borderRadius: r, boxShadow: [BoxShadow(color: Colors.black.withOpacity(d ? .3 : .12), blurRadius: 30, spreadRadius: -4, offset: const Offset(0, 14))]),
+            child: ClipRRect(borderRadius: r, child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
+                child: CustomPaint(foregroundPainter: _RimPainter(radius, d),
+                    child: Container(
+                        decoration: BoxDecoration(borderRadius: r, gradient: fill ?? LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight,
+                            colors: [Colors.white.withOpacity(d ? .14 : .34), Colors.white.withOpacity(d ? .04 : .1)])),
+                        child: child)))));
+      });
+}
 class Splash extends StatefulWidget { const Splash({super.key}); @override State<Splash> createState() => _SplashS(); }
 class _SplashS extends State<Splash> with SingleTickerProviderStateMixin {
   late final c = AnimationController(vsync: this, duration: const Duration(milliseconds: 1000))..forward();
@@ -519,7 +622,7 @@ class _SplashS extends State<Splash> with SingleTickerProviderStateMixin {
           const SizedBox(height: 8),
           Text('DEEP, BLUE AND MIST', style: TextStyle(fontSize: 12, letterSpacing: 5, color: th.tx.withOpacity(.6))),
           const SizedBox(height: 10),
-          Text('build 18', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
+          Text('build 19', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
           const SizedBox(height: 26),
           SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: th.ac)),
         ])))));
@@ -1149,11 +1252,18 @@ class SettingsPage extends StatelessWidget {
           subtitle: const Text('Your name in script on the player'), value: on,
           onChanged: (v) async { showSig.value = v; HapticFeedback.selectionClick(); (await SharedPreferences.getInstance()).setBool('sig', v); })),
       _sw(glassSkin, 'glass', Icons.blur_on_rounded, 'Liquid glass skin', 'Floating glass player and tab bar'),
+      ValueListenableBuilder<int>(valueListenable: skin, builder: (_, v, __) => ListTile(
+          leading: const Icon(Icons.style_rounded), title: const Text('Card style'),
+          subtitle: Padding(padding: const EdgeInsets.only(top: 8), child: Wrap(spacing: 8, runSpacing: 6, children: [
+            for (int i = 0; i < skinNames.length; i++) ChoiceChip(label: Text(skinNames[i]), selected: v == i,
+                onSelected: (_) async { skin.value = i; HapticFeedback.selectionClick(); (await SharedPreferences.getInstance()).setInt('skin', i); })]))),
+      ),
       ValueListenableBuilder<String?>(valueListenable: wallpaperPath, builder: (_, p, __) => Column(children: [
         ListTile(leading: const Icon(Icons.wallpaper_rounded), title: const Text('Custom wallpaper'),
             subtitle: Text(p == null ? 'Use any picture from your gallery, like an anime or movie wallpaper' : 'Tap to change'),
             trailing: p == null ? null : IconButton(icon: const Icon(Icons.close_rounded), onPressed: clearWallpaper),
             onTap: pickWallpaper),
+        if (p != null) _sw(matchWall, 'matchWall', Icons.palette_rounded, 'Match colors to wallpaper', 'Theme colors follow your picture', updateWallAccent),
         if (p != null) Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: Row(children: [
           const Text('Dim'),
           Expanded(child: ValueListenableBuilder<double>(valueListenable: wallDim, builder: (_, v, __) => Slider(min: 0, max: .9, value: v,
@@ -1652,10 +1762,8 @@ class MixesTab extends StatelessWidget {
     final cols = mixColors(x.name);
     return GestureDetector(
       onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => MixPage(x))),
-      child: Container(padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(borderRadius: BorderRadius.circular(26),
-              gradient: LinearGradient(colors: cols, begin: Alignment.topLeft, end: Alignment.bottomRight)),
-          child: Stack(children: [
+      child: GlassBox(radius: 26, fill: LinearGradient(colors: cols, begin: Alignment.topLeft, end: Alignment.bottomRight),
+          child: Padding(padding: const EdgeInsets.all(16), child: Stack(children: [
             Icon(x.icon, size: 30, color: Colors.white.withOpacity(.85)),
             Positioned(left: 0, right: 0, bottom: 0, child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
               Text(x.name, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w600)),
@@ -1666,7 +1774,7 @@ class MixesTab extends StatelessWidget {
                 onTap: () { HapticFeedback.selectionClick(); playList(x.toPlay(), 0); },
                 child: Container(width: 38, height: 38, decoration: BoxDecoration(color: Colors.white.withOpacity(.22), shape: BoxShape.circle),
                     child: const Icon(Icons.play_arrow_rounded, color: Colors.white)))),
-          ])),
+          ]))),
     );
   }
 }
