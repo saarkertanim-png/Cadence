@@ -33,6 +33,26 @@ const themes = [
   Th('Ivory Minimal', Color(0xFFFAF6EE), Color(0xFFE6D9BD), Color(0xFF8A6D3B), Color(0xFF2D2A24), false),
   Th('Rose Mist', Color(0xFFF8EEEE), Color(0xFFE8B4C2), Color(0xFFC0577A), Color(0xFF4A2A33), false),
   Th('Forest Shadow', Color(0xFF0F1F17), Color(0xFF24523A), Color(0xFF7FBF8E), Color(0xFFDCEBE0), true),
+  // Anime
+  Th('Sakura Anime', Color(0xFFFFF0F5), Color(0xFFF7B8D0), Color(0xFFE0508A), Color(0xFF3A1F2E), false),
+  Th('Neon Tokyo', Color(0xFF0A0614), Color(0xFF3B1170), Color(0xFFFF4FD8), Color(0xFFF4E8FF), true),
+  Th('Shonen Sunrise', Color(0xFFFFF4E0), Color(0xFFFFB347), Color(0xFFE8451E), Color(0xFF2B1A10), false),
+  Th('Magical Girl', Color(0xFFFDF0FF), Color(0xFFC9A7FF), Color(0xFFB04DFF), Color(0xFF33204A), false),
+  Th('Moonlit Anime', Color(0xFF0E1230), Color(0xFF3A3F8F), Color(0xFF9FB4FF), Color(0xFFE8ECFF), true),
+  Th('Cyber Mecha', Color(0xFF05101A), Color(0xFF0F3D4F), Color(0xFF00E5FF), Color(0xFFD8F8FF), true),
+  // Cartoon
+  Th('Cat and Mouse', Color(0xFFF1EEE6), Color(0xFFBFD3E6), Color(0xFF2F6EA5), Color(0xFF22303C), false),
+  Th('Cheese Pop', Color(0xFFFFF6D6), Color(0xFFFFD54A), Color(0xFFE08A00), Color(0xFF3B2A00), false),
+  Th('Cartoon Pop', Color(0xFFFFFBEA), Color(0xFF7EC8FF), Color(0xFFFF3D5A), Color(0xFF1B1B2F), false),
+  Th('Retro Toon', Color(0xFFF3E9D2), Color(0xFFE4A672), Color(0xFFC2452D), Color(0xFF33261A), false),
+  Th('Candy Land', Color(0xFFFFF0F8), Color(0xFF9AE6FF), Color(0xFFFF5CA8), Color(0xFF3A2040), false),
+  // Movie
+  Th('Noir Cinema', Color(0xFF0B0B0D), Color(0xFF2A2A2E), Color(0xFFE5E5E5), Color(0xFFF0F0F0), true),
+  Th('Golden Screen', Color(0xFF14100A), Color(0xFF4A3510), Color(0xFFF2C14E), Color(0xFFF6EBD0), true),
+  Th('Space Odyssey', Color(0xFF02030A), Color(0xFF1B1F4D), Color(0xFF8AA2FF), Color(0xFFE6EAFF), true),
+  Th('Horror Crimson', Color(0xFF0D0506), Color(0xFF4A0F14), Color(0xFFFF3B3B), Color(0xFFF7E3E3), true),
+  Th('Western Dust', Color(0xFFF2E4CC), Color(0xFFD9A25F), Color(0xFF9C4A1A), Color(0xFF3A2412), false),
+  Th('Cyberpunk Rain', Color(0xFF080A12), Color(0xFF3B0F4F), Color(0xFFFF7A1A), Color(0xFFF2E9FF), true),
 ];
 final adaptiveColors = ValueNotifier<bool>(false);
 final artAccent = ValueNotifier<Color?>(null);
@@ -173,6 +193,28 @@ Future<String?> askText(BuildContext c, String title, String init, {bool number 
       actions: [TextButton(onPressed: () => Navigator.pop(d), child: const Text('Cancel')),
         FilledButton(onPressed: () => Navigator.pop(d, tc.text), child: const Text('Save'))]));
 }
+final glassSkin = ValueNotifier<bool>(true);
+final wallpaperPath = ValueNotifier<String?>(null);
+final wallDim = ValueNotifier<double>(.45);
+Future<void> pickWallpaper() async {
+  try {
+    final r = await FilePicker.platform.pickFiles(type: FileType.image);
+    final src = r?.files.single.path;
+    if (src == null) return;
+    final dst = '${lib.docs.path}/wall_${DateTime.now().millisecondsSinceEpoch}.jpg';
+    await File(src).copy(dst);
+    final old = wallpaperPath.value;
+    wallpaperPath.value = dst;
+    (await SharedPreferences.getInstance()).setString('wall', dst);
+    if (old != null) { try { await File(old).delete(); } catch (_) {} }
+  } catch (_) { snack('Could not use that picture.'); }
+}
+Future<void> clearWallpaper() async {
+  final old = wallpaperPath.value;
+  wallpaperPath.value = null;
+  (await SharedPreferences.getInstance()).remove('wall');
+  if (old != null) { try { await File(old).delete(); } catch (_) {} }
+}
 final autoTheme = ValueNotifier<bool>(false);
 void applyAutoTheme() {
   if (!autoTheme.value) return;
@@ -197,6 +239,9 @@ Future<void> main() async {
   sigFont.value = sp.getInt('sigFont') ?? 0;
   sigSize.value = sp.getDouble('sigSize') ?? 22;
   recents.value = sp.getStringList('recent') ?? [];
+  glassSkin.value = sp.getBool('glass') ?? true;
+  wallpaperPath.value = sp.getString('wall');
+  wallDim.value = sp.getDouble('wallDim') ?? .45;
   adaptiveColors.value = sp.getBool('adaptive') ?? false;
   vizOn.value = sp.getBool('viz') ?? true;
   try {
@@ -282,7 +327,7 @@ void _diagOnce() {
     try {
       final n = await Permission.notification.status;
       final b = await Permission.ignoreBatteryOptimizations.isGranted;
-      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 17');
+      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 18');
     } catch (_) {}
   });
 }
@@ -403,6 +448,7 @@ class CadenceApp extends StatelessWidget {
                 duration: const Duration(milliseconds: 600),
                 decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight,
                     colors: [Color.lerp(t.bg, t.bg2, .6)!, t.bg, Color.lerp(t.bg, t.bg2, .35)!])))),
+            const Positioned.fill(child: WallLayer()),
             Positioned(top: -90, left: -80, child: _blob(t.ac, 300)),
             Positioned(bottom: 120, right: -120, child: _blob(t.bg2, 340)),
             child!,
@@ -412,6 +458,39 @@ class CadenceApp extends StatelessWidget {
       });
   Widget _blob(Color c, double s) => IgnorePointer(child: Container(width: s, height: s,
       decoration: BoxDecoration(shape: BoxShape.circle, gradient: RadialGradient(colors: [c.withOpacity(.25), Colors.transparent]))));
+}
+
+class WallLayer extends StatelessWidget {
+  const WallLayer({super.key});
+  @override
+  Widget build(BuildContext c) => ListenableBuilder(
+      listenable: Listenable.merge([wallpaperPath, wallDim, themeIx]),
+      builder: (_, __) {
+        final p = wallpaperPath.value;
+        if (p == null || !File(p).existsSync()) return const SizedBox.shrink();
+        return Stack(fit: StackFit.expand, children: [
+          Image.file(File(p), fit: BoxFit.cover, gaplessPlayback: true, errorBuilder: (_, __, ___) => const SizedBox.shrink()),
+          ColoredBox(color: th.bg.withOpacity(wallDim.value)),
+        ]);
+      });
+}
+
+class GlassBox extends StatelessWidget {
+  final Widget child; final double radius;
+  const GlassBox({super.key, required this.child, this.radius = 30});
+  @override
+  Widget build(BuildContext c) {
+    final r = BorderRadius.circular(radius), d = th.dark;
+    return Container(
+        decoration: BoxDecoration(borderRadius: r, boxShadow: [BoxShadow(color: Colors.black.withOpacity(d ? .35 : .15), blurRadius: 26, offset: const Offset(0, 10))]),
+        child: ClipRRect(borderRadius: r, child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 28, sigmaY: 28),
+            child: Container(
+                decoration: BoxDecoration(borderRadius: r,
+                    gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight,
+                        colors: [Colors.white.withOpacity(d ? .18 : .6), Colors.white.withOpacity(d ? .05 : .22)]),
+                    border: Border.all(color: Colors.white.withOpacity(d ? .25 : .75), width: 1)),
+                child: child))));
+  }
 }
 
 class Splash extends StatefulWidget { const Splash({super.key}); @override State<Splash> createState() => _SplashS(); }
@@ -440,7 +519,7 @@ class _SplashS extends State<Splash> with SingleTickerProviderStateMixin {
           const SizedBox(height: 8),
           Text('DEEP, BLUE AND MIST', style: TextStyle(fontSize: 12, letterSpacing: 5, color: th.tx.withOpacity(.6))),
           const SizedBox(height: 10),
-          Text('build 17', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
+          Text('build 18', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
           const SizedBox(height: 26),
           SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: th.ac)),
         ])))));
@@ -478,6 +557,15 @@ class _HomeS extends State<Home> with WidgetsBindingObserver {
     if (s == AppLifecycleState.paused) saveState();
     if (s == AppLifecycleState.resumed && !permsBusy) lib.scan();
   }
+  Widget _nav(Color bg) => NavigationBar(backgroundColor: bg, surfaceTintColor: Colors.transparent, elevation: 0, selectedIndex: i,
+      indicatorColor: th.ac.withOpacity(.22),
+      onDestinationSelected: (v) { HapticFeedback.selectionClick(); setState(() => i = v); },
+      destinations: const [
+        NavigationDestination(icon: Icon(Icons.library_music_outlined), selectedIcon: Icon(Icons.library_music), label: 'Library'),
+        NavigationDestination(icon: Icon(Icons.queue_music_outlined), selectedIcon: Icon(Icons.queue_music), label: 'Mixes'),
+        NavigationDestination(icon: Icon(Icons.equalizer_rounded), label: 'Equalizer'),
+        NavigationDestination(icon: Icon(Icons.tune_rounded), label: 'Settings'),
+      ]);
   @override
   Widget build(BuildContext context) {
     Theme.of(context);
@@ -487,19 +575,13 @@ class _HomeS extends State<Home> with WidgetsBindingObserver {
           transitionBuilder: (w, a) => FadeTransition(opacity: a,
               child: SlideTransition(position: Tween(begin: const Offset(.04, 0), end: Offset.zero).animate(a), child: w)),
           child: KeyedSubtree(key: ValueKey(i), child: [const LibraryPage(), const MixesTab(), const EqPage(), const SettingsPage()][i])),
-      bottomNavigationBar: ClipRect(child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            const MiniPlayer(),
-            NavigationBar(backgroundColor: th.bg.withOpacity(.55), elevation: 0, selectedIndex: i,
-                onDestinationSelected: (v) { HapticFeedback.selectionClick(); setState(() => i = v); },
-                destinations: const [
-                  NavigationDestination(icon: Icon(Icons.library_music_outlined), selectedIcon: Icon(Icons.library_music), label: 'Library'),
-                  NavigationDestination(icon: Icon(Icons.queue_music_outlined), selectedIcon: Icon(Icons.queue_music), label: 'Mixes'),
-                  NavigationDestination(icon: Icon(Icons.equalizer_rounded), label: 'Equalizer'),
-                  NavigationDestination(icon: Icon(Icons.tune_rounded), label: 'Settings'),
-                ]),
-          ]))),
+      bottomNavigationBar: ValueListenableBuilder<bool>(valueListenable: glassSkin, builder: (_, g, __) => g
+          ? SafeArea(top: false, child: Padding(padding: const EdgeInsets.fromLTRB(14, 0, 14, 8), child: Column(mainAxisSize: MainAxisSize.min, children: [
+              const MiniPlayer(),
+              GlassBox(radius: 34, child: _nav(Colors.transparent)),
+            ])))
+          : ClipRect(child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [const MiniPlayer(), _nav(th.bg.withOpacity(.55))])))),
     );
   }
 }
@@ -531,26 +613,29 @@ Track? curTrack(SequenceState? s) { final it = s?.currentSource?.tag; return it 
 
 class MiniPlayer extends StatelessWidget {
   const MiniPlayer({super.key});
+  Widget _body(BuildContext c, Track t) => GestureDetector(
+      onHorizontalDragEnd: (d) { final v = d.primaryVelocity ?? 0; if (v < -300) { player.seekToNext(); } else if (v > 300) { player.seekToPrevious(); } },
+      child: InkWell(
+          borderRadius: BorderRadius.circular(30),
+          onTap: () => Navigator.push(c, slideUp(const NowPlaying())),
+          child: Padding(padding: const EdgeInsets.fromLTRB(14, 8, 8, 8), child: Row(children: [
+            Hero(tag: 'art', child: Art(t, 46, 12)), const SizedBox(width: 12),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(t.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600)),
+              Text(t.artist, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: th.tx.withOpacity(.65))),
+            ])),
+            const PlayBtn(44),
+            IconButton(icon: const Icon(Icons.skip_next_rounded), onPressed: player.seekToNext),
+          ]))));
   @override
   Widget build(BuildContext c) => StreamBuilder<SequenceState?>(stream: player.sequenceStateStream, builder: (_, s) {
         final t = curTrack(s.data);
-        return AnimatedSize(duration: const Duration(milliseconds: 300), curve: Curves.easeOutCubic,
-            child: t == null ? const SizedBox(width: double.infinity) : GestureDetector(
-                onHorizontalDragEnd: (d) { final v = d.primaryVelocity ?? 0; if (v < -300) { player.seekToNext(); } else if (v > 300) { player.seekToPrevious(); } },
-                child: InkWell(
-                onTap: () => Navigator.push(c, slideUp(const NowPlaying())),
-                child: Padding(padding: const EdgeInsets.fromLTRB(14, 8, 8, 4), child: Row(children: [
-                  Hero(tag: 'art', child: Art(t, 46, 12)), const SizedBox(width: 12),
-                  Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text(t.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600)),
-                    Text(t.artist, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: th.tx.withOpacity(.65))),
-                  ])),
-                  const PlayBtn(44),
-                  IconButton(icon: const Icon(Icons.skip_next_rounded), onPressed: player.seekToNext),
-                ])))));
+        return ValueListenableBuilder<bool>(valueListenable: glassSkin, builder: (_, g, __) => AnimatedSize(
+            duration: const Duration(milliseconds: 300), curve: Curves.easeOutCubic,
+            child: t == null ? const SizedBox(width: double.infinity)
+                : g ? Padding(padding: const EdgeInsets.only(bottom: 8), child: GlassBox(radius: 30, child: _body(c, t))) : _body(c, t)));
       });
 }
-
 class LibraryPage extends StatefulWidget { const LibraryPage({super.key}); @override State<LibraryPage> createState() => _LibS(); }
 class _LibS extends State<LibraryPage> {
   int tab = 0; String q = '', sort = 'title';
@@ -1063,6 +1148,19 @@ class SettingsPage extends StatelessWidget {
           secondary: const Icon(Icons.draw_outlined), title: const Text('Show signature'),
           subtitle: const Text('Your name in script on the player'), value: on,
           onChanged: (v) async { showSig.value = v; HapticFeedback.selectionClick(); (await SharedPreferences.getInstance()).setBool('sig', v); })),
+      _sw(glassSkin, 'glass', Icons.blur_on_rounded, 'Liquid glass skin', 'Floating glass player and tab bar'),
+      ValueListenableBuilder<String?>(valueListenable: wallpaperPath, builder: (_, p, __) => Column(children: [
+        ListTile(leading: const Icon(Icons.wallpaper_rounded), title: const Text('Custom wallpaper'),
+            subtitle: Text(p == null ? 'Use any picture from your gallery, like an anime or movie wallpaper' : 'Tap to change'),
+            trailing: p == null ? null : IconButton(icon: const Icon(Icons.close_rounded), onPressed: clearWallpaper),
+            onTap: pickWallpaper),
+        if (p != null) Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: Row(children: [
+          const Text('Dim'),
+          Expanded(child: ValueListenableBuilder<double>(valueListenable: wallDim, builder: (_, v, __) => Slider(min: 0, max: .9, value: v,
+              onChanged: (x) => wallDim.value = x,
+              onChangeEnd: (x) async { (await SharedPreferences.getInstance()).setDouble('wallDim', x); }))),
+        ])),
+      ])),
       _sw(adaptiveColors, 'adaptive', Icons.palette_outlined, 'Colors from album art', 'The accent color follows the cover of the song playing', updateArtAccent),
       _sw(vizOn, 'viz', Icons.equalizer_rounded, 'Visualizer', 'Moving bars on the player while music plays'),
       ListenableBuilder(listenable: Listenable.merge([sigText, sigFont, sigSize]), builder: (ctx, _) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
