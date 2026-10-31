@@ -196,6 +196,118 @@ Future<String?> askText(BuildContext c, String title, String init, {bool number 
 }
 final glassSkin = ValueNotifier<bool>(true);
 final skin = ValueNotifier<int>(0);
+// ---- streaming from the user's own GitHub repo ----
+final repoLink = ValueNotifier<String?>(null);
+final onlineTracks = ValueNotifier<List<Track>>([]);
+final onlineByUrl = <String, Track>{};
+final onlineCover = <String, String>{};
+final onlineBusy = ValueNotifier<bool>(false);
+
+class RepoRef { final String o, r; final String? b; const RepoRef(this.o, this.r, this.b); }
+RepoRef? parseRepo(String raw) {
+  var x = raw.trim().replaceAll(RegExp(r'^https?://'), '').replaceAll(RegExp(r'^www\.'), '');
+  if (x.startsWith('github.com/')) { x = x.substring(11); }
+  x = x.split('?').first.split('#').first;
+  final p = x.split('/').where((e) => e.isNotEmpty).toList();
+  if (p.length < 2 || p.first.contains('.')) return null;
+  var repo = p[1];
+  if (repo.endsWith('.git')) { repo = repo.substring(0, repo.length - 4); }
+  final br = (p.length >= 4 && (p[2] == 'tree' || p[2] == 'blob')) ? p[3] : null;
+  return RepoRef(p[0], repo, br);
+}
+
+Future<bool> connectRepo(String raw, {bool quiet = false}) async {
+  final ref = parseRepo(raw);
+  if (ref == null) { snack('Paste the repo address, like https://github.com/user/repo'); return false; }
+  onlineBusy.value = true;
+  try {
+    var branch = ref.b;
+    if (branch == null) {
+      final j = await _getJson(Uri.https('api.github.com', '/repos/${ref.o}/${ref.r}'));
+      if (j is! Map) { if (!quiet) snack('Repo not found. It must be public.'); return false; }
+      branch = (j['default_branch'] ?? 'main').toString();
+    }
+    final tj = await _getJson(Uri.https('api.github.com', '/repos/${ref.o}/${ref.r}/git/trees/$branch', {'recursive': '1'}));
+    if (tj is! Map || tj['tree'] is! List) { if (!quiet) snack('Could not read that repo.'); return false; }
+    const audio = {'mp3', 'flac', 'm4a', 'aac', 'ogg', 'opus', 'wav'};
+    const imgs = {'jpg', 'jpeg', 'png'};
+    final files = <Map>[];
+    final images = <String>{};
+    for (final e in (tj['tree'] as List)) {
+      if (e is! Map || e['type'] != 'blob') continue;
+      final path = e['path'].toString();
+      final dot = path.lastIndexOf('.');
+      if (dot < 0) continue;
+      final ext = path.substring(dot + 1).toLowerCase();
+      if (audio.contains(ext)) { files.add(e); }
+      else if (imgs.contains(ext)) { images.add(path); }
+    }
+    String url(String path) => Uri(scheme: 'https', host: 'raw.githubusercontent.com', pathSegments: [ref.o, ref.r, branch!, ...path.split('/')]).toString();
+    final out = <Track>[];
+    final byUrl = <String, Track>{};
+    onlineCover.clear();
+    for (final e in files) {
+      final path = e['path'].toString();
+      final slash = path.lastIndexOf('/');
+      final dir = slash < 0 ? '' : path.substring(0, slash);
+      final file = path.substring(slash + 1);
+      final dot = file.lastIndexOf('.');
+      final base = file.substring(0, dot).replaceAll('_', ' ').trim();
+      final ext = file.substring(dot + 1).toUpperCase();
+      final folder = dir.isEmpty ? ref.r : dir.split('/').last;
+      var title = base, artist = dir.isEmpty ? ref.o : folder;
+      final sep = base.indexOf(' - ');
+      if (sep > 0) { artist = base.substring(0, sep).trim(); title = base.substring(sep + 3).trim(); }
+      final u = url(path);
+      final stem = path.substring(0, path.lastIndexOf('.'));
+      String? cover;
+      for (final c in ['$stem.jpg', '$stem.jpeg', '$stem.png', '${dir.isEmpty ? '' : '$dir/'}cover.jpg', '${dir.isEmpty ? '' : '$dir/'}cover.png', '${dir.isEmpty ? '' : '$dir/'}folder.jpg']) {
+        if (images.contains(c)) { cover = url(c); break; }
+      }
+      if (cover != null) { onlineCover[u] = cover; }
+      final t = Track({'p': u, 't': title, 'a': artist, 'al': folder, 'f': '$ext · Online', 'd': 0, 's': (e['size'] is int) ? e['size'] : 0, 'ad': 0});
+      out.add(t);
+      byUrl[u] = t;
+    }
+    out.sort((a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()));
+    onlineByUrl..clear()..addAll(byUrl);
+    onlineTracks.value = out;
+    repoLink.value = raw.trim();
+    (await SharedPreferences.getInstance()).setString('repo', raw.trim());
+    if (!quiet) { snack(out.isEmpty ? 'Connected, but no songs were found in that repo.' : 'Connected. ${out.length} songs ready to stream.'); }
+    return true;
+  } catch (_) {
+    if (!quiet) snack('Could not connect. Check the link and your internet.');
+    return false;
+  } finally { onlineBusy.value = false; }
+}
+
+Future<void> disconnectRepo() async {
+  repoLink.value = null;
+  onlineTracks.value = [];
+  onlineByUrl.clear();
+  onlineCover.clear();
+  (await SharedPreferences.getInstance()).remove('repo');
+}
+
+Future<void> repoDialog(BuildContext c) async {
+  final tc = TextEditingController(text: repoLink.value ?? '');
+  final r = await showDialog<String>(context: c, builder: (d) => AlertDialog(
+      title: const Text('Connect your GitHub repo'),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        TextField(controller: tc, autofocus: true, keyboardType: TextInputType.url,
+            decoration: const InputDecoration(hintText: 'https://github.com/user/repo')),
+        const SizedBox(height: 10),
+        const Text('The repo must be public and hold your songs (mp3, flac, m4a, ogg, opus, wav). Name files like "Artist - Title.mp3". A picture with the same name, or cover.jpg in the folder, becomes the cover.', style: TextStyle(fontSize: 12)),
+      ]),
+      actions: [
+        if (repoLink.value != null) TextButton(onPressed: () => Navigator.pop(d, ''), child: const Text('Disconnect')),
+        TextButton(onPressed: () => Navigator.pop(d), child: const Text('Cancel')),
+        FilledButton(onPressed: () => Navigator.pop(d, tc.text), child: const Text('Connect')),
+      ]));
+  if (r == null) return;
+  if (r.isEmpty) { await disconnectRepo(); snack('Disconnected.'); } else { await connectRepo(r); }
+}
 final fx = ValueNotifier<int>(0);
 const fxNames = ['Off', 'Sakura petals', 'Neon rain', 'Snow', 'Sparkles', 'Fireflies', 'Film grain'];
 // name, theme index, card style, effect
@@ -273,6 +385,8 @@ Future<void> main() async {
   wallDim.value = sp.getDouble('wallDim') ?? .45;
   skin.value = sp.getInt('skin') ?? 0;
   fx.value = sp.getInt('fx') ?? 0;
+  final savedRepo = sp.getString('repo');
+  if (savedRepo != null) { repoLink.value = savedRepo; connectRepo(savedRepo, quiet: true); }
   matchWall.value = sp.getBool('matchWall') ?? false;
   updateWallAccent();
   adaptiveColors.value = sp.getBool('adaptive') ?? false;
@@ -333,9 +447,14 @@ Route<T> slideUp<T>(Widget w) => PageRouteBuilder<T>(
         position: Tween(begin: const Offset(0, 1), end: Offset.zero)
             .animate(CurvedAnimation(parent: a, curve: Curves.easeOutCubic, reverseCurve: Curves.easeInCubic)), child: c));
 
-AudioSource _src(Track t) => AudioSource.uri(Uri.file(t.path),
-    tag: MediaItem(id: t.path, title: t.title, artist: t.artist, album: t.album,
-        artUri: t.art == null ? null : Uri.file(t.art!), duration: t.dur > 0 ? Duration(milliseconds: t.dur) : null));
+AudioSource _src(Track t) {
+  final online = t.path.startsWith('http');
+  final cv = onlineCover[t.path];
+  return AudioSource.uri(online ? Uri.parse(t.path) : Uri.file(t.path),
+      tag: MediaItem(id: t.path, title: t.title, artist: t.artist, album: t.album,
+          artUri: t.art != null ? Uri.file(t.art!) : (cv != null ? Uri.parse(cv) : null),
+          duration: t.dur > 0 ? Duration(milliseconds: t.dur) : null));
+}
 
 Future<void> ensureNotif() async {
   if (!Platform.isAndroid || permsBusy) return;
@@ -360,14 +479,14 @@ void _diagOnce() {
     try {
       final n = await Permission.notification.status;
       final b = await Permission.ignoreBatteryOptimizations.isGranted;
-      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 20');
+      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 21');
     } catch (_) {}
   });
 }
 
 Future<void> playList(List<Track> l, int i) async {
   await ensureNotif();
-  final src = ConcatenatingAudioSource(children: [for (final t in l) _src(t)]);
+  final src = ConcatenatingAudioSource(children: [for (final t in l) _src(t)], shuffleOrder: NextShuffleOrder());
   try {
     await player.setAudioSource(src, initialIndex: i);
     player.play();
@@ -412,7 +531,7 @@ Future<void> restoreState() async {
     final cur = qi >= 0 && qi < q.length ? q[qi] : null;
     var ix = ts.indexWhere((t) => t.path == cur);
     if (ix < 0) ix = 0;
-    await player.setAudioSource(ConcatenatingAudioSource(children: [for (final t in ts) _src(t)]),
+    await player.setAudioSource(ConcatenatingAudioSource(children: [for (final t in ts) _src(t)], shuffleOrder: NextShuffleOrder()),
         initialIndex: ix, initialPosition: Duration(milliseconds: p.getInt('qpos') ?? 0));
     restoreEq();
   } catch (_) {}
@@ -430,14 +549,40 @@ void _countTimer() {
   });
 }
 
-Future<void> addToQueue(Track t, {bool next = false}) async {
-  final s = player.audioSource;
-  if (s is! ConcatenatingAudioSource || s.length == 0) { await playList([t], 0); return; }
-  try {
-    if (next) { await s.insert((player.currentIndex ?? -1) + 1, _src(t)); } else { await s.add(_src(t)); }
-    snack(next ? 'Will play next' : 'Added to queue');
-  } catch (_) { snack('Could not add to queue.'); }
+bool wantNextFirst = false;
+// Keeps "Play next" songs right after the current one even when shuffle is on.
+class NextShuffleOrder extends DefaultShuffleOrder {
+  @override
+  void insert(int index, int count) {
+    super.insert(index, count);
+    if (!wantNextFirst) return;
+    final cur = player.currentIndex;
+    if (cur == null) return;
+    final fresh = [for (int i = index; i < index + count; i++) i];
+    indices.removeWhere(fresh.contains);
+    final pos = indices.indexOf(cur);
+    indices.insertAll(pos < 0 ? 0 : pos + 1, fresh);
+  }
 }
+
+Future<void> addMany(List<Track> l, {bool next = false}) async {
+  if (l.isEmpty) return;
+  final s = player.audioSource;
+  if (s is! ConcatenatingAudioSource || s.length == 0) { await playList(l, 0); return; }
+  try {
+    final kids = [for (final t in l) _src(t)];
+    if (next) {
+      wantNextFirst = true;
+      await s.insertAll((player.currentIndex ?? -1) + 1, kids);
+    } else {
+      await s.addAll(kids);
+    }
+    snack(next ? (l.length == 1 ? 'Will play next' : '${l.length} songs will play next') : (l.length == 1 ? 'Added to queue' : '${l.length} songs added to queue'));
+  } catch (_) { snack('Could not add to queue.'); }
+  finally { wantNextFirst = false; }
+}
+
+Future<void> addToQueue(Track t, {bool next = false}) => addMany([t], next: next);
 
 Future<void> playNext(Track t) => addToQueue(t, next: true);
 
@@ -695,11 +840,11 @@ class GlassBox extends StatelessWidget {
         // 0: Apple-style liquid glass
         return Container(
             decoration: BoxDecoration(borderRadius: r, boxShadow: [BoxShadow(color: Colors.black.withOpacity(d ? .3 : .12), blurRadius: 30, spreadRadius: -4, offset: const Offset(0, 14))]),
-            child: ClipRRect(borderRadius: r, child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
+            child: ClipRRect(borderRadius: r, child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 30, sigmaY: 30),
                 child: CustomPaint(foregroundPainter: _RimPainter(radius, d),
                     child: Container(
                         decoration: BoxDecoration(borderRadius: r, gradient: fill ?? LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight,
-                            colors: [Colors.white.withOpacity(d ? .14 : .34), Colors.white.withOpacity(d ? .04 : .1)])),
+                            colors: [Colors.white.withOpacity(d ? .09 : .2), Colors.white.withOpacity(d ? .02 : .05)])),
                         child: child)))));
       });
 }
@@ -729,7 +874,7 @@ class _SplashS extends State<Splash> with SingleTickerProviderStateMixin {
           const SizedBox(height: 8),
           Text('DEEP, BLUE AND MIST', style: TextStyle(fontSize: 12, letterSpacing: 5, color: th.tx.withOpacity(.6))),
           const SizedBox(height: 10),
-          Text('build 20', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
+          Text('build 21', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
           const SizedBox(height: 26),
           SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: th.ac)),
         ])))));
@@ -780,6 +925,7 @@ class _HomeS extends State<Home> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     Theme.of(context);
     return Scaffold(
+      extendBody: true,
       body: AnimatedSwitcher(
           duration: const Duration(milliseconds: 350),
           transitionBuilder: (w, a) => FadeTransition(opacity: a,
@@ -819,12 +965,16 @@ class PlayBtn extends StatelessWidget {
   }
 }
 
-Track? curTrack(SequenceState? s) { final it = s?.currentSource?.tag; return it is MediaItem ? lib.byPath[it.id] : null; }
+Track? curTrack(SequenceState? s) { final it = s?.currentSource?.tag; return it is MediaItem ? (lib.byPath[it.id] ?? onlineByUrl[it.id]) : null; }
+Future<void> skipNext() async {
+  if (player.hasNext) { await player.seekToNext(); }
+  else if ((player.sequence?.length ?? 0) > 0) { await player.seek(Duration.zero, index: 0); }
+}
 
 class MiniPlayer extends StatelessWidget {
   const MiniPlayer({super.key});
   Widget _body(BuildContext c, Track t) => GestureDetector(
-      onHorizontalDragEnd: (d) { final v = d.primaryVelocity ?? 0; if (v < -300) { player.seekToNext(); } else if (v > 300) { player.seekToPrevious(); } },
+      onHorizontalDragEnd: (d) { final v = d.primaryVelocity ?? 0; if (v < -300) { skipNext(); } else if (v > 300) { player.seekToPrevious(); } },
       child: InkWell(
           borderRadius: BorderRadius.circular(30),
           onTap: () => Navigator.push(c, slideUp(const NowPlaying())),
@@ -835,7 +985,7 @@ class MiniPlayer extends StatelessWidget {
               Text(t.artist, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: th.tx.withOpacity(.65))),
             ])),
             const PlayBtn(44),
-            IconButton(icon: const Icon(Icons.skip_next_rounded), onPressed: player.seekToNext),
+            IconButton(icon: const Icon(Icons.skip_next_rounded), onPressed: skipNext),
           ]))));
   @override
   Widget build(BuildContext c) => StreamBuilder<SequenceState?>(stream: player.sequenceStateStream, builder: (_, s) {
@@ -849,6 +999,57 @@ class MiniPlayer extends StatelessWidget {
 class LibraryPage extends StatefulWidget { const LibraryPage({super.key}); @override State<LibraryPage> createState() => _LibS(); }
 class _LibS extends State<LibraryPage> {
   int tab = 0; String q = '', sort = 'title';
+  bool selecting = false;
+  final List<String> sel = [];
+  Track? _find(String p) => lib.byPath[p] ?? onlineByUrl[p];
+  List<Track> _picked() { final o = <Track>[]; for (final p in sel) { final t = _find(p); if (t != null) o.add(t); } return o; }
+  void _toggle(String p) => setState(() { if (!sel.remove(p)) sel.add(p); });
+  void _exitSel() => setState(() { selecting = false; sel.clear(); });
+  Widget _selBar(BuildContext c, List<Track> shown) {
+    final picked = _picked();
+    return Padding(padding: const EdgeInsets.fromLTRB(8, 4, 12, 0), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        IconButton(icon: const Icon(Icons.close_rounded), onPressed: _exitSel),
+        Expanded(child: Text('${sel.length} selected', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600))),
+        TextButton(onPressed: () => setState(() { for (final t in shown) { if (!sel.contains(t.path)) sel.add(t.path); } }), child: const Text('Select all')),
+        const SizedBox(width: 4),
+        FilledButton.icon(onPressed: picked.isEmpty ? null : () { final l = picked; _exitSel(); playList(l, 0); },
+            icon: const Icon(Icons.play_arrow_rounded), label: const Text('Play')),
+      ]),
+      Wrap(spacing: 8, children: [
+        ActionChip(avatar: const Icon(Icons.queue_play_next_rounded, size: 18), label: const Text('Play next'),
+            onPressed: picked.isEmpty ? null : () { final l = picked; _exitSel(); addMany(l, next: true); }),
+        ActionChip(avatar: const Icon(Icons.queue_music_rounded, size: 18), label: const Text('Add to queue'),
+            onPressed: picked.isEmpty ? null : () { final l = picked; _exitSel(); addMany(l); }),
+        ActionChip(avatar: const Icon(Icons.playlist_add_rounded, size: 18), label: const Text('Playlist'),
+            onPressed: picked.isEmpty ? null : () { final l = picked; _exitSel(); pickPlaylistMany(context, l); }),
+      ]),
+    ]));
+  }
+  Widget onlineBody(BuildContext c) => ValueListenableBuilder<List<Track>>(valueListenable: onlineTracks, builder: (_, all, __) {
+        final link = repoLink.value;
+        if (link == null) {
+          return Center(key: const ValueKey('on'), child: Padding(padding: const EdgeInsets.all(32), child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.cloud_outlined, size: 64, color: th.ac), const SizedBox(height: 12),
+            const Text('Stream from your repo', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600)), const SizedBox(height: 6),
+            const Text('Connect a public GitHub repo with your songs and play them online.', textAlign: TextAlign.center),
+            const SizedBox(height: 16),
+            FilledButton.icon(onPressed: () => repoDialog(c), icon: const Icon(Icons.link_rounded), label: const Text('Connect repo')),
+          ])));
+        }
+        final f = [for (final t in all) if ('${t.title} ${t.artist} ${t.album}'.toLowerCase().contains(q.toLowerCase())) t];
+        return ListView.builder(key: const ValueKey('on'), itemCount: f.length + 1, itemBuilder: (_, i) {
+          if (i == 0) {
+            return ListTile(leading: Icon(Icons.cloud_done_outlined, color: th.ac), title: Text(link, maxLines: 1, overflow: TextOverflow.ellipsis),
+                subtitle: Text('${all.length} songs · tap to change'),
+                trailing: ValueListenableBuilder<bool>(valueListenable: onlineBusy, builder: (_, busy, __) => busy
+                    ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2))
+                    : IconButton(icon: const Icon(Icons.refresh_rounded), onPressed: () => connectRepo(link))),
+                onTap: () => repoDialog(c));
+          }
+          return tile(f, i - 1, null);
+        });
+      });
   List<Track> get list {
     final l = lib.tracks.where((t) => (tab != 3 || lib.favs.contains(t.path)) &&
         '${t.title} ${t.artist} ${t.album} ${t.fmt}'.toLowerCase().contains(q.toLowerCase())).toList();
@@ -909,10 +1110,16 @@ class _LibS extends State<LibraryPage> {
         title: Text(t.title, maxLines: 1, overflow: TextOverflow.ellipsis,
             style: TextStyle(fontWeight: FontWeight.w600, color: on ? th.ac : null)),
         subtitle: Text('${t.artist} · ${t.badge}', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
-        trailing: IconButton(icon: Icon(lib.favs.contains(t.path) ? Icons.favorite : Icons.favorite_border, color: th.ac),
-            onPressed: () { HapticFeedback.selectionClick(); lib.toggleFav(t); }),
-        onTap: () => playList(src, i),
-        onLongPress: () { HapticFeedback.mediumImpact(); trackSheet(context, t); });
+        trailing: selecting
+            ? Checkbox(value: sel.contains(t.path), onChanged: (_) => _toggle(t.path))
+            : IconButton(icon: Icon(lib.favs.contains(t.path) ? Icons.favorite : Icons.favorite_border, color: th.ac),
+                onPressed: () { HapticFeedback.selectionClick(); lib.toggleFav(t); }),
+        onTap: selecting ? () => _toggle(t.path) : () => playList(src, i),
+        onLongPress: () {
+          HapticFeedback.mediumImpact();
+          if (selecting) { _toggle(t.path); return; }
+          trackSheet(context, t, onSelect: () => setState(() { selecting = true; if (!sel.contains(t.path)) sel.add(t.path); }));
+        });
   }
   @override
   Widget build(BuildContext context) {
@@ -922,6 +1129,8 @@ class _LibS extends State<LibraryPage> {
       Widget body;
       if (tab == 4) {
         body = playlistsBody(c);
+      } else if (tab == 6) {
+        body = onlineBody(c);
       } else if (l.isEmpty) {
         body = Center(key: const ValueKey('e'), child: Padding(padding: const EdgeInsets.all(32), child: Column(mainAxisSize: MainAxisSize.min, children: [
           Icon(Icons.library_music_outlined, size: 64, color: th.ac), const SizedBox(height: 12),
@@ -948,12 +1157,13 @@ class _LibS extends State<LibraryPage> {
             children: [for (int i = 0; i < g[k]!.length; i++) tile(g[k]!, i, null)])]);
       }
       return SafeArea(bottom: false, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Padding(padding: const EdgeInsets.fromLTRB(20, 8, 8, 0), child: Row(children: [
+        if (selecting) _selBar(c, tab == 6 ? onlineTracks.value : l) else Padding(padding: const EdgeInsets.fromLTRB(20, 8, 8, 0), child: Row(children: [
           const Expanded(child: Text('Cadence', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w300, letterSpacing: 1))),
           lib.scanning
               ? Padding(padding: const EdgeInsets.all(14), child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: th.ac)))
               : IconButton(tooltip: 'Scan device', icon: const Icon(Icons.refresh_rounded), onPressed: lib.scan),
           if (!Platform.isAndroid) IconButton(tooltip: 'Add files', icon: const Icon(Icons.add_rounded), onPressed: lib.importFiles),
+          IconButton(tooltip: 'Select songs', icon: const Icon(Icons.checklist_rounded), onPressed: () => setState(() => selecting = true)),
           PopupMenuButton<String>(icon: const Icon(Icons.sort_rounded), onSelected: (v) => setState(() => sort = v),
               itemBuilder: (_) => [for (final s in ['title', 'artist', 'album', 'size', 'added']) PopupMenuItem(value: s, child: Text('Sort by $s'))]),
         ])),
@@ -962,7 +1172,7 @@ class _LibS extends State<LibraryPage> {
             decoration: InputDecoration(hintText: 'Search songs, artists, albums', prefixIcon: const Icon(Icons.search), filled: true,
                 fillColor: th.bg.withOpacity(.55), border: OutlineInputBorder(borderRadius: BorderRadius.circular(28), borderSide: BorderSide.none)))),
         SizedBox(height: 44, child: ListView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 12), children: [
-          for (final e in ['Songs', 'Albums', 'Artists', 'Favorites', 'Playlists', 'Folders'].asMap().entries)
+          for (final e in ['Songs', 'Albums', 'Artists', 'Favorites', 'Playlists', 'Folders', 'Online'].asMap().entries)
             Padding(padding: const EdgeInsets.symmetric(horizontal: 4), child: ChoiceChip(label: Text(e.value), selected: tab == e.key,
                 onSelected: (_) { HapticFeedback.selectionClick(); setState(() => tab = e.key); }))])),
         if (lib.scanning) Padding(padding: const EdgeInsets.fromLTRB(20, 2, 20, 4), child: Text('Found ${lib.found} songs…', style: const TextStyle(fontSize: 12))),
@@ -1128,7 +1338,7 @@ class NowPlaying extends StatelessWidget {
                     onPressed: () async { final on = !(s.data ?? false); await player.setShuffleModeEnabled(on); if (on) await player.shuffle(); })),
                 IconButton(iconSize: 38, icon: const Icon(Icons.skip_previous_rounded), onPressed: player.seekToPrevious),
                 const PlayBtn(72),
-                IconButton(iconSize: 38, icon: const Icon(Icons.skip_next_rounded), onPressed: player.seekToNext),
+                IconButton(iconSize: 38, icon: const Icon(Icons.skip_next_rounded), onPressed: skipNext),
                 StreamBuilder<LoopMode>(stream: player.loopModeStream, builder: (_, s) {
                   final lm = s.data ?? LoopMode.off;
                   return IconButton(icon: Icon(lm == LoopMode.one ? Icons.repeat_one_rounded : Icons.repeat_rounded, color: lm == LoopMode.off ? null : th.ac),
@@ -1188,7 +1398,29 @@ void infoSheet(BuildContext c, Track t) {
   ]));
 }
 
-void trackSheet(BuildContext c, Track t) => _sheet(c, Column(mainAxisSize: MainAxisSize.min, children: [
+void pickPlaylistMany(BuildContext c, List<Track> l) {
+  final local = [for (final t in l) if (lib.byPath[t.path] != null) t];
+  if (local.isEmpty) { snack('Online songs cannot be added to playlists yet.'); return; }
+  _sheet(c, Column(mainAxisSize: MainAxisSize.min, children: [
+    ListTile(leading: const Icon(Icons.add), title: const Text('New playlist'), onTap: () async {
+      Navigator.pop(c);
+      final n = await askName(c, '');
+      if (n != null && n.trim().isNotEmpty) {
+        await lib.newPlaylist(n);
+        for (final t in local) { await lib.addTo(n.trim(), t.path); }
+        snack('Added ${local.length} songs to ${n.trim()}');
+      }
+    }),
+    for (final n in lib.playlists.keys.toList()) ListTile(leading: const Icon(Icons.queue_music), title: Text(n), onTap: () async {
+      Navigator.pop(c);
+      for (final t in local) { await lib.addTo(n, t.path); }
+      snack('Added ${local.length} songs to $n');
+    }),
+  ]));
+}
+
+void trackSheet(BuildContext c, Track t, {VoidCallback? onSelect}) => _sheet(c, Column(mainAxisSize: MainAxisSize.min, children: [
+      if (onSelect != null) ListTile(leading: const Icon(Icons.checklist_rounded), title: const Text('Select'), onTap: () { Navigator.pop(c); onSelect(); }),
       ListTile(leading: const Icon(Icons.queue_play_next_rounded), title: const Text('Play next'), onTap: () { Navigator.pop(c); playNext(t); }),
       ListTile(leading: const Icon(Icons.queue_music_rounded), title: const Text('Add to queue'), onTap: () { Navigator.pop(c); addToQueue(t); }),
       ListTile(leading: const Icon(Icons.playlist_add_rounded), title: const Text('Add to playlist'), onTap: () { Navigator.pop(c); pickPlaylist(c, t); }),
@@ -1328,7 +1560,7 @@ class _EqS extends State<EqPage> {
         if (boost > 6) Text('High boost can distort. Lower it if you hear crackle.', style: TextStyle(color: Colors.orange.shade800)),
       ]);
     }
-    return SafeArea(bottom: false, child: ListView(padding: const EdgeInsets.all(20), children: [
+    return SafeArea(bottom: false, child: ListView(padding: EdgeInsets.fromLTRB(20, 20, 20, 20 + MediaQuery.paddingOf(context).bottom), children: [
       const Text('Equalizer', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w300)), const SizedBox(height: 12), body]));
   }
 }
@@ -1338,7 +1570,7 @@ class SettingsPage extends StatelessWidget {
   @override
   Widget build(BuildContext c) {
     Theme.of(c);
-    return SafeArea(bottom: false, child: ListView(padding: const EdgeInsets.all(20), children: [
+    return SafeArea(bottom: false, child: ListView(padding: EdgeInsets.fromLTRB(20, 20, 20, 20 + MediaQuery.paddingOf(c).bottom), children: [
       const Text('Settings', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w300)), const SizedBox(height: 16),
       const Text('Looks', style: TextStyle(fontWeight: FontWeight.w600)), const SizedBox(height: 4),
       Text('One tap sets theme, card style and effect together', style: TextStyle(fontSize: 12, color: th.tx.withOpacity(.6))),
@@ -1412,6 +1644,9 @@ class SettingsPage extends StatelessWidget {
         Center(child: Padding(padding: const EdgeInsets.only(bottom: 8),
             child: Text(sigText.value, style: sigStyle(sigFont.value, sigSize.value, th.tx.withOpacity(.7))))),
       ])),
+      ListTile(leading: const Icon(Icons.cloud_outlined), title: const Text('Online library (GitHub)'),
+          subtitle: ValueListenableBuilder<String?>(valueListenable: repoLink, builder: (_, v, __) => Text(v ?? 'Stream songs from your own repo')),
+          onTap: () => repoDialog(c)),
       ListTile(leading: const Icon(Icons.backup_outlined), title: const Text('Back up to clipboard'),
           subtitle: const Text('Playlists, favorites, play counts and signature'), onTap: backupToClipboard),
       ListTile(leading: const Icon(Icons.restore_rounded), title: const Text('Restore from clipboard'),
@@ -1867,7 +2102,7 @@ class MixesTab extends StatelessWidget {
     Theme.of(c);
     return ListenableBuilder(listenable: lib, builder: (_, __) => ValueListenableBuilder<List<String>>(valueListenable: recents, builder: (_, rec, __) {
       final mixes = buildMixes(rec);
-      return ListView(padding: const EdgeInsets.fromLTRB(20, 20, 20, 24), children: [
+      return ListView(padding: EdgeInsets.fromLTRB(20, 20, 20, 24 + MediaQuery.paddingOf(c).bottom), children: [
         const Text('Mixes', style: TextStyle(fontSize: 34, fontWeight: FontWeight.w300)),
         const SizedBox(height: 4),
         Text('Made from your own library', style: TextStyle(color: th.tx.withOpacity(.6))),
