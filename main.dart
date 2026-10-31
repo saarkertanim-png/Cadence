@@ -202,6 +202,427 @@ final onlineTracks = ValueNotifier<List<Track>>([]);
 final onlineByUrl = <String, Track>{};
 final onlineCover = <String, String>{};
 final onlineBusy = ValueNotifier<bool>(false);
+Future<List<dynamic>> _apiGet(Uri u) async {
+  final c = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+  try {
+    final rq = await c.getUrl(u);
+    rq.headers.set('User-Agent', 'Cadence/1.0');
+    final rs = await rq.close().timeout(const Duration(seconds: 25));
+    final body = await rs.transform(utf8.decoder).join();
+    dynamic j;
+    try { j = jsonDecode(body); } catch (_) {}
+    return [rs.statusCode, j];
+  } finally { c.close(force: true); }
+}
+
+
+// ---------------- Music providers ----------------
+// Every source of online music is a MusicProvider. The player never changes: it only
+// plays the https stream URLs that providers hand back.
+abstract class MusicProvider {
+  String get id;
+  String get name;
+  String get blurb;
+  IconData get icon;
+  List<String> get caps;
+  bool get ready => true;
+  String get setup => '';
+  Future<List<Track>> search(String q);
+  Future<List<Track>> trending();
+  Future<List<Track>> expand(Track collection) async => [collection];
+}
+
+String provOf(Track t) => (t.j['prov'] ?? '').toString();
+bool isCollection(Track t) => t.j['coll'] == true;
+
+Track mkTrack({required MusicProvider p, required String url, required String title, required String artist,
+    String album = '', String? cover, int ms = 0, String? license, bool collection = false}) {
+  final t = Track({'p': url, 't': title, 'a': artist, 'al': album.isEmpty ? p.name : album,
+    'f': collection ? '${p.name} · Collection' : p.name, 'd': ms, 's': 0, 'ad': 0,
+    'prov': p.id, 'lic': license ?? '', 'coll': collection});
+  onlineByUrl[url] = t;
+  if (cover != null && cover.isNotEmpty) { onlineCover[url] = cover; }
+  return t;
+}
+
+dynamic jget(dynamic o, String? path) {
+  if (path == null || path.isEmpty) return o;
+  dynamic cur = o;
+  for (final k in path.split('.')) {
+    if (cur is Map) {
+      cur = cur[k];
+    } else if (cur is List) {
+      final i = int.tryParse(k);
+      cur = (i != null && i >= 0 && i < cur.length) ? cur[i] : null;
+    } else {
+      return null;
+    }
+  }
+  return cur;
+}
+
+String ccLabel(String? url) {
+  if (url == null || url.isEmpty) return '';
+  final m = RegExp(r'creativecommons\.org/(licenses|publicdomain)/([\w-]+)/?([\d.]*)').firstMatch(url);
+  if (m == null) return url.contains('publicdomain') ? 'Public domain' : 'See source';
+  if (m.group(1) == 'publicdomain') return m.group(2) == 'zero' ? 'CC0' : 'Public domain';
+  final v = m.group(3) ?? '';
+  return 'CC ${m.group(2)!.toUpperCase()}${v.isEmpty ? '' : ' $v'}';
+}
+
+// 1) Audius: free music uploaded by independent artists. No account or key.
+class AudiusProvider extends MusicProvider {
+  @override
+  String get id => 'audius';
+  @override
+  String get name => 'Audius';
+  @override
+  String get blurb => 'Free music uploaded by independent artists';
+  @override
+  IconData get icon => Icons.graphic_eq_rounded;
+  @override
+  List<String> get caps => const ['Search', 'Trending', 'Streaming', 'Artwork'];
+  Future<List<Track>> _go(String path, Map<String, String> qp) async {
+    final r = await _apiGet(Uri.https('api.audius.co', path, {'app_name': 'Cadence', 'limit': '30', ...qp}));
+    final data = (r[1] is Map) ? (r[1] as Map)['data'] : null;
+    if (r[0] != 200 || data is! List) throw 'could not be reached (error ${r[0]})';
+    final out = <Track>[];
+    for (final e in data) {
+      if (e is! Map || e['is_streamable'] == false || e['id'] == null) continue;
+      final user = e['user'] is Map ? (e['user'] as Map)['name']?.toString() : null;
+      final art = e['artwork'] is Map ? ((e['artwork'] as Map)['480x480'] ?? (e['artwork'] as Map)['150x150'])?.toString() : null;
+      final secs = (e['duration'] is num) ? (e['duration'] as num).toInt() : 0;
+      out.add(mkTrack(p: this, url: 'https://api.audius.co/v1/tracks/${e['id']}/stream?app_name=Cadence',
+          title: (e['title'] ?? 'Untitled').toString(), artist: user ?? 'Unknown artist',
+          album: (e['genre'] ?? '').toString(), cover: art, ms: secs * 1000));
+    }
+    return out;
+  }
+  @override
+  Future<List<Track>> search(String q) => _go('/v1/tracks/search', {'query': q});
+  @override
+  Future<List<Track>> trending() => _go('/v1/tracks/trending', {'time': 'week'});
+}
+
+// 2) Jamendo: Creative Commons music. Needs a free client ID from developer.jamendo.com.
+final jamendoKey = ValueNotifier<String>('');
+class JamendoProvider extends MusicProvider {
+  @override
+  String get id => 'jamendo';
+  @override
+  String get name => 'Jamendo';
+  @override
+  String get blurb => 'Creative Commons music from independent artists';
+  @override
+  IconData get icon => Icons.music_note_rounded;
+  @override
+  List<String> get caps => const ['Search', 'Popular now', 'Streaming', 'Artwork', 'License info'];
+  @override
+  bool get ready => jamendoKey.value.trim().isNotEmpty;
+  @override
+  String get setup => 'Add your free client ID from developer.jamendo.com';
+  Future<List<Track>> _go(Map<String, String> qp) async {
+    final r = await _apiGet(Uri.https('api.jamendo.com', '/v3.0/tracks/', {
+      'client_id': jamendoKey.value.trim(), 'format': 'json', 'limit': '30', 'audioformat': 'mp32', 'imagesize': '300', ...qp}));
+    final j = r[1];
+    if (j is! Map) throw 'could not be reached (error ${r[0]})';
+    final h = j['headers'];
+    if (h is Map && h['status'] != 'success') throw (h['error_message'] ?? 'refused the request').toString();
+    final res = j['results'];
+    if (res is! List) throw 'returned no results';
+    final out = <Track>[];
+    for (final e in res) {
+      if (e is! Map) continue;
+      final audio = e['audio'];
+      if (audio is! String || audio.isEmpty) continue;
+      final secs = int.tryParse((e['duration'] ?? '0').toString()) ?? 0;
+      out.add(mkTrack(p: this, url: audio, title: (e['name'] ?? 'Untitled').toString(),
+          artist: (e['artist_name'] ?? 'Unknown artist').toString(), album: (e['album_name'] ?? '').toString(),
+          cover: (e['image'] ?? e['album_image'])?.toString(), ms: secs * 1000, license: ccLabel(e['license_ccurl']?.toString())));
+    }
+    return out;
+  }
+  @override
+  Future<List<Track>> search(String q) => _go({'search': q});
+  @override
+  Future<List<Track>> trending() => _go({'order': 'popularity_week'});
+}
+
+// 3) Internet Archive: only items that carry a Creative Commons / public-domain license are shown.
+//    Each result is a recording (album or concert); tapping it opens its audio files.
+class ArchiveProvider extends MusicProvider {
+  @override
+  String get id => 'archive';
+  @override
+  String get name => 'Internet Archive';
+  @override
+  String get blurb => 'Creative Commons and public-domain recordings';
+  @override
+  IconData get icon => Icons.account_balance_rounded;
+  @override
+  List<String> get caps => const ['Search', 'Popular now', 'Opens albums and concerts', 'Streaming', 'Artwork', 'License check'];
+  static bool _licensed(dynamic l) => (l is List ? l.join(' ') : (l ?? '')).toString().toLowerCase().contains('creativecommons.org');
+  static String _s(dynamic v) => v is List ? (v.isEmpty ? '' : v.first.toString()) : (v ?? '').toString();
+  Future<List<Track>> _query(String lucene, {bool requireLicenseInQuery = true}) async {
+    final q = requireLicenseInQuery ? '$lucene AND licenseurl:*creativecommons*' : lucene;
+    final r = await _apiGet(Uri.https('archive.org', '/advancedsearch.php', {
+      'q': q, 'fl[]': ['identifier', 'title', 'creator', 'licenseurl'], 'rows': '60', 'output': 'json', 'sort[]': 'downloads desc'}));
+    final resp = (r[1] is Map) ? (r[1] as Map)['response'] : null;
+    final docs = resp is Map ? resp['docs'] : null;
+    if (r[0] != 200 || docs is! List) throw 'could not be reached (error ${r[0]})';
+    final out = <Track>[];
+    for (final d in docs) {
+      if (d is! Map || d['identifier'] == null || !_licensed(d['licenseurl'])) continue;
+      final id = d['identifier'].toString();
+      final creator = _s(d['creator']);
+      out.add(mkTrack(p: this, url: 'ia://$id', title: _s(d['title']).isEmpty ? id : _s(d['title']),
+          artist: creator.isEmpty ? 'Various artists' : creator, cover: 'https://archive.org/services/img/$id',
+          license: ccLabel(_s(d['licenseurl'])), collection: true));
+    }
+    return out;
+  }
+  Future<List<Track>> _licensedQuery(String lucene) async {
+    final a = await _query(lucene);
+    if (a.isNotEmpty) return a;
+    return _query(lucene, requireLicenseInQuery: false);
+  }
+  @override
+  Future<List<Track>> search(String q) {
+    final clean = q.replaceAll(RegExp(r'[+\-&|!(){}\[\]^"~*?:\\/]'), ' ').trim();
+    if (clean.isEmpty) return trending();
+    return _licensedQuery('($clean) AND mediatype:audio');
+  }
+  @override
+  Future<List<Track>> trending() => _licensedQuery('mediatype:audio AND collection:netlabels');
+  @override
+  Future<List<Track>> expand(Track item) async {
+    final id = item.path.replaceFirst('ia://', '');
+    final r = await _apiGet(Uri.https('archive.org', '/metadata/$id'));
+    final j = r[1];
+    if (r[0] != 200 || j is! Map) throw 'could not open this item (error ${r[0]})';
+    final meta = j['metadata'] is Map ? j['metadata'] as Map : <dynamic, dynamic>{};
+    if (!_licensed(meta['licenseurl'])) throw 'This recording has no open license, so Cadence will not play it.';
+    final lic = ccLabel(_s(meta['licenseurl']));
+    final albumTitle = _s(meta['title']);
+    final albumArtist = _s(meta['creator']);
+    final files = j['files'] is List ? j['files'] as List : const [];
+    final byBase = <String, Map>{};
+    for (final f in files) {
+      if (f is! Map || f['name'] == null) continue;
+      final fmt = (f['format'] ?? '').toString().toLowerCase();
+      final isMp3 = fmt.contains('mp3'), isOgg = fmt.contains('ogg vorbis');
+      if (!isMp3 && !isOgg) continue;
+      final name = f['name'].toString();
+      final dot = name.lastIndexOf('.');
+      final base = dot > 0 ? name.substring(0, dot) : name;
+      final old = byBase[base];
+      if (old == null || (isMp3 && !(old['format'] ?? '').toString().toLowerCase().contains('mp3'))) { byBase[base] = f; }
+    }
+    final list = byBase.values.toList();
+    int trackNo(Map f) => int.tryParse(_s(f['track']).split('/').first) ?? 9999;
+    list.sort((a, b) {
+      final c = trackNo(a).compareTo(trackNo(b));
+      return c != 0 ? c : a['name'].toString().compareTo(b['name'].toString());
+    });
+    final out = <Track>[];
+    for (final f in list.take(200)) {
+      final name = f['name'].toString();
+      final slash = name.lastIndexOf('/');
+      final file = name.substring(slash + 1);
+      final dot = file.lastIndexOf('.');
+      final fallback = (dot > 0 ? file.substring(0, dot) : file).replaceAll('_', ' ');
+      final len = _s(f['length']);
+      double secs = 0;
+      if (len.contains(':')) {
+        for (final part in len.split(':')) { secs = secs * 60 + (double.tryParse(part) ?? 0); }
+      } else {
+        secs = double.tryParse(len) ?? 0;
+      }
+      final artist = _s(f['creator']).isNotEmpty ? _s(f['creator']) : (_s(f['artist']).isNotEmpty ? _s(f['artist']) : (albumArtist.isEmpty ? item.artist : albumArtist));
+      out.add(mkTrack(p: this, url: Uri(scheme: 'https', host: 'archive.org', pathSegments: ['download', id, ...name.split('/')]).toString(),
+          title: _s(f['title']).isNotEmpty ? _s(f['title']) : fallback, artist: artist,
+          album: _s(f['album']).isNotEmpty ? _s(f['album']) : albumTitle, cover: 'https://archive.org/services/img/$id',
+          ms: (secs * 1000).round(), license: lic));
+    }
+    return out;
+  }
+}
+
+// 4) Your own GitHub repo with songs in it (connected in Providers).
+class RepoProvider extends MusicProvider {
+  @override
+  String get id => 'repo';
+  @override
+  String get name => 'My GitHub repo';
+  @override
+  String get blurb => 'Songs you host in your own public repo';
+  @override
+  IconData get icon => Icons.cloud_outlined;
+  @override
+  List<String> get caps => const ['Search', 'Streaming', 'Artwork'];
+  @override
+  bool get ready => repoLink.value != null;
+  @override
+  String get setup => 'Connect your repo in Providers';
+  @override
+  Future<List<Track>> search(String q) async {
+    final k = q.toLowerCase();
+    return [for (final t in onlineTracks.value) if ('${t.title} ${t.artist} ${t.album}'.toLowerCase().contains(k)) t];
+  }
+  @override
+  Future<List<Track>> trending() async => onlineTracks.value.take(60).toList();
+}
+
+// 5) Providers you describe yourself in `providers.json` inside your connected repo.
+//    Data only: Cadence calls the https JSON API you describe and plays the https stream URLs it returns.
+//    No code from the repo is ever run.
+class JsonProvider extends MusicProvider {
+  final Map cfg;
+  JsonProvider(this.cfg);
+  @override
+  String get id => 'json:${cfg['id']}';
+  @override
+  String get name => (cfg['name'] ?? cfg['id']).toString();
+  @override
+  String get blurb => (cfg['description'] ?? 'Provider from your repo').toString();
+  @override
+  IconData get icon => Icons.extension_rounded;
+  @override
+  List<String> get caps => [if (cfg['search'] is Map) 'Search', if (cfg['trending'] is Map) 'Browse', 'Streaming', 'From your repo'];
+  Future<List<Track>> _run(Map spec, Map<String, String> vars) async {
+    var url = (spec['url'] ?? '').toString();
+    vars.forEach((k, v) { url = url.replaceAll('{$k}', Uri.encodeQueryComponent(v)); });
+    final u = Uri.tryParse(url);
+    if (u == null || u.scheme != 'https') throw 'provider URLs must start with https://';
+    final r = await _apiGet(u);
+    if (r[0] != 200) throw 'answered with error ${r[0]}';
+    final items = jget(r[1], spec['results']?.toString());
+    if (items is! List) throw 'did not return a list of tracks';
+    final f = cfg['fields'] is Map ? cfg['fields'] as Map : <dynamic, dynamic>{};
+    final unit = (cfg['durationUnit'] ?? 's').toString();
+    final tmpl = cfg['streamTemplate']?.toString();
+    final out = <Track>[];
+    for (final e in items.take(60)) {
+      String? g(String k) { final v = jget(e, f[k]?.toString()); return v?.toString(); }
+      var stream = g('stream');
+      if ((stream == null || stream.isEmpty) && tmpl != null) { stream = tmpl.replaceAll('{id}', g('id') ?? ''); }
+      if (stream == null || !stream.startsWith('https://')) continue;
+      final dur = double.tryParse(g('duration') ?? '') ?? 0;
+      out.add(mkTrack(p: this, url: stream, title: g('title') ?? 'Untitled', artist: g('artist') ?? 'Unknown artist',
+          album: g('album') ?? '', cover: g('cover'), ms: unit == 'ms' ? dur.round() : (dur * 1000).round(), license: cfg['license']?.toString()));
+    }
+    return out;
+  }
+  @override
+  Future<List<Track>> search(String q) async {
+    final s = cfg['search'];
+    if (s is! Map) return [];
+    return _run(s, {'query': q, 'limit': '30'});
+  }
+  @override
+  Future<List<Track>> trending() async {
+    final s = cfg['trending'];
+    if (s is! Map) return [];
+    return _run(s, {'limit': '30'});
+  }
+}
+
+class ProviderHub {
+  final builtIn = <MusicProvider>[AudiusProvider(), JamendoProvider(), ArchiveProvider(), RepoProvider()];
+  final json = ValueNotifier<List<MusicProvider>>([]);
+  final enabled = <String, bool>{};
+  final results = ValueNotifier<List<Track>>([]);
+  final busy = ValueNotifier<bool>(false);
+  final errors = ValueNotifier<Map<String, String>>({});
+  String query = '';
+  List<MusicProvider> get all => [...builtIn, ...json.value];
+  MusicProvider? byId(String id) { for (final p in all) { if (p.id == id) return p; } return null; }
+  bool on(MusicProvider p) => enabled[p.id] ?? true;
+  Future<void> setOn(MusicProvider p, bool v) async {
+    enabled[p.id] = v;
+    (await SharedPreferences.getInstance()).setBool('prov_${p.id}', v);
+  }
+  Future<void> loadPrefs() async {
+    final sp = await SharedPreferences.getInstance();
+    for (final p in all) { enabled[p.id] = sp.getBool('prov_${p.id}') ?? true; }
+  }
+  // One search across every enabled provider. Results are mixed so no single source takes over.
+  Future<void> search(String q) async {
+    query = q.trim();
+    busy.value = true;
+    final errs = <String, String>{};
+    try {
+      final active = all.where((p) => on(p) && p.ready).toList();
+      final lists = await Future.wait(active.map((p) async {
+        try {
+          return query.isEmpty ? await p.trending() : await p.search(query);
+        } catch (e) {
+          errs[p.id] = e.toString();
+          return <Track>[];
+        }
+      }));
+      final merged = <Track>[];
+      for (int i = 0; ; i++) {
+        var any = false;
+        for (final l in lists) { if (i < l.length) { merged.add(l[i]); any = true; } }
+        if (!any) break;
+      }
+      results.value = merged;
+    } finally {
+      errors.value = errs;
+      busy.value = false;
+    }
+  }
+}
+final hub = ProviderHub();
+
+// Plays one online result. Collections (like an Internet Archive recording) open into their tracks first.
+Future<void> onlinePlay(List<Track> list, int i) async {
+  final t = list[i];
+  if (isCollection(t)) {
+    final p = hub.byId(provOf(t));
+    if (p == null) return;
+    snack('Opening "${t.title}"…');
+    try {
+      final files = await p.expand(t);
+      if (files.isEmpty) { snack('No playable audio was found in this item.'); return; }
+      await playList(files, 0);
+    } catch (e) {
+      snack('${p.name}: ${e.toString().replaceFirst('Exception: ', '')}');
+    }
+    return;
+  }
+  final playable = [for (final x in list) if (!isCollection(x)) x];
+  final idx = playable.indexWhere((x) => x.path == t.path);
+  await playList(playable, idx < 0 ? 0 : idx);
+}
+
+void providerSheet(BuildContext c) => _sheet(c, StatefulBuilder(builder: (ctx, setS) => SizedBox(
+    height: MediaQuery.sizeOf(ctx).height * .72,
+    child: ListView(children: [
+      const Padding(padding: EdgeInsets.fromLTRB(20, 6, 20, 2), child: Text('Music providers', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600))),
+      Padding(padding: const EdgeInsets.fromLTRB(20, 0, 20, 8), child: Text(
+          'Turn sources on or off. One search covers every source that is on. Only legal, licensed or self-hosted music is supported.',
+          style: TextStyle(fontSize: 12, color: th.tx.withOpacity(.65)))),
+      for (final p in hub.all) Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        SwitchListTile(secondary: Icon(p.icon), title: Text(p.name), isThreeLine: true, value: hub.on(p),
+            subtitle: Text('${p.blurb}\nCan: ${p.caps.join(' · ')}${p.ready ? '' : '\n! ${p.setup}'}'),
+            onChanged: (v) async { await hub.setOn(p, v); setS(() {}); }),
+        if (p.id == 'jamendo') Padding(padding: const EdgeInsets.only(left: 72), child: TextButton(
+            onPressed: () async {
+              final v = await askText(ctx, 'Jamendo client ID', jamendoKey.value);
+              if (v == null) return;
+              jamendoKey.value = v.trim();
+              (await SharedPreferences.getInstance()).setString('jamendoKey', v.trim());
+              setS(() {});
+            }, child: Text(jamendoKey.value.isEmpty ? 'Add client ID' : 'Change client ID'))),
+        if (p.id == 'repo') Padding(padding: const EdgeInsets.only(left: 72), child: TextButton(
+            onPressed: () async { await repoDialog(ctx); setS(() {}); },
+            child: Text(repoLink.value == null ? 'Connect repo' : 'Change repo'))),
+      ]),
+      const SizedBox(height: 16),
+    ]))));
+
 
 class RepoRef { final String o, r; final String? b; const RepoRef(this.o, this.r, this.b); }
 RepoRef? parseRepo(String raw) {
@@ -295,9 +716,11 @@ Future<bool> connectRepo(String raw, {bool quiet = false}) async {
     const imgs = {'jpg', 'jpeg', 'png'};
     final files = <Map>[];
     final images = <String>{};
+    String? provPath;
     for (final e in (tj['tree'] as List)) {
       if (e is! Map || e['type'] != 'blob') continue;
       final path = e['path'].toString();
+      if (path == 'providers.json' || path == 'cadence-providers.json') { provPath = path; continue; }
       final dot = path.lastIndexOf('.');
       if (dot < 0) continue;
       final ext = path.substring(dot + 1).toLowerCase();
@@ -308,7 +731,6 @@ Future<bool> connectRepo(String raw, {bool quiet = false}) async {
     String url(String path) => Uri(scheme: 'https', host: 'raw.githubusercontent.com', pathSegments: [rf.o, rf.r, br, ...path.split('/')]).toString();
     final out = <Track>[];
     final byUrl = <String, Track>{};
-    onlineCover.clear();
     for (final e in files) {
       final path = e['path'].toString();
       final slash = path.lastIndexOf('/');
@@ -329,16 +751,29 @@ Future<bool> connectRepo(String raw, {bool quiet = false}) async {
         if (images.contains(c)) { cover = url(c); break; }
       }
       if (cover != null) { onlineCover[u] = cover; }
-      final t = Track({'p': u, 't': title, 'a': artist, 'al': folder, 'f': '$ext · Online', 'd': 0, 's': (e['size'] is int) ? e['size'] : 0, 'ad': 0});
+      final t = Track({'p': u, 't': title, 'a': artist, 'al': folder, 'f': '$ext · Online', 'd': 0, 's': (e['size'] is int) ? e['size'] : 0, 'ad': 0, 'prov': 'repo'});
       out.add(t);
       byUrl[u] = t;
     }
     out.sort((a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()));
-    onlineByUrl..clear()..addAll(byUrl);
+    onlineByUrl.addAll(byUrl);
     onlineTracks.value = out;
+    final extra = <MusicProvider>[];
+    if (provPath != null) {
+      try {
+        final pr = await _apiGet(Uri.parse(url(provPath)));
+        final pj = pr[1];
+        final plist = pj is Map ? pj['providers'] : pj;
+        if (pr[0] == 200 && plist is List) {
+          for (final e in plist) { if (e is Map && e['id'] != null) { extra.add(JsonProvider(e)); } }
+        }
+      } catch (_) {}
+    }
+    hub.json.value = extra;
+    await hub.loadPrefs();
     repoLink.value = 'https://github.com/${rf.o}/${rf.r}';
     (await SharedPreferences.getInstance()).setString('repo', repoLink.value!);
-    if (!quiet) { snack(out.isEmpty ? 'Connected, but no songs were found. Upload mp3 or flac files to the repo, then tap refresh.' : 'Connected. ${out.length} songs ready to stream.'); }
+    if (!quiet) { snack(out.isEmpty && extra.isEmpty ? 'Connected, but no songs or providers.json were found. Upload mp3 or flac files, then tap refresh.' : 'Connected. ${out.length} songs${extra.isEmpty ? '' : ' and ${extra.length} provider${extra.length == 1 ? '' : 's'}'} ready.'); }
     return true;
   } catch (_) {
     if (!quiet) snack('Could not connect. Check your internet connection and try again.');
@@ -348,9 +783,9 @@ Future<bool> connectRepo(String raw, {bool quiet = false}) async {
 
 Future<void> disconnectRepo() async {
   repoLink.value = null;
+  for (final t in onlineTracks.value) { onlineByUrl.remove(t.path); onlineCover.remove(t.path); }
   onlineTracks.value = [];
-  onlineByUrl.clear();
-  onlineCover.clear();
+  hub.json.value = [];
   (await SharedPreferences.getInstance()).remove('repo');
 }
 
@@ -449,6 +884,8 @@ Future<void> main() async {
   wallDim.value = sp.getDouble('wallDim') ?? .45;
   skin.value = sp.getInt('skin') ?? 0;
   fx.value = sp.getInt('fx') ?? 0;
+  jamendoKey.value = sp.getString('jamendoKey') ?? '';
+  await hub.loadPrefs();
   final savedRepo = sp.getString('repo');
   if (savedRepo != null) { repoLink.value = savedRepo; connectRepo(savedRepo, quiet: true); }
   matchWall.value = sp.getBool('matchWall') ?? false;
@@ -543,7 +980,7 @@ void _diagOnce() {
     try {
       final n = await Permission.notification.status;
       final b = await Permission.ignoreBatteryOptimizations.isGranted;
-      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 22');
+      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 24');
     } catch (_) {}
   });
 }
@@ -938,7 +1375,7 @@ class _SplashS extends State<Splash> with SingleTickerProviderStateMixin {
           const SizedBox(height: 8),
           Text('DEEP, BLUE AND MIST', style: TextStyle(fontSize: 12, letterSpacing: 5, color: th.tx.withOpacity(.6))),
           const SizedBox(height: 10),
-          Text('build 22', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
+          Text('build 24', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
           const SizedBox(height: 26),
           SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: th.ac)),
         ])))));
@@ -953,11 +1390,13 @@ class Art extends StatelessWidget {
     Theme.of(c);
     final ph = Container(decoration: BoxDecoration(gradient: LinearGradient(colors: [th.bg2, th.ac])),
         child: Icon(Icons.music_note_rounded, size: s * .45, color: Colors.white.withOpacity(.9)));
+    final tt = t;
+    final cv = tt == null ? null : onlineCover[tt.path];
     return ClipRRect(borderRadius: BorderRadius.circular(r), child: SizedBox(width: s, height: s,
         child: t?.art != null
             ? Image.file(File(t!.art!), fit: BoxFit.cover, gaplessPlayback: true,
                 cacheWidth: (s * MediaQuery.devicePixelRatioOf(c)).round(), errorBuilder: (_, __, ___) => ph)
-            : ph));
+            : cv != null ? Image.network(cv, fit: BoxFit.cover, gaplessPlayback: true, errorBuilder: (_, __, ___) => ph) : ph));
   }
 }
 
@@ -1709,6 +2148,9 @@ class SettingsPage extends StatelessWidget {
         Center(child: Padding(padding: const EdgeInsets.only(bottom: 8),
             child: Text(sigText.value, style: sigStyle(sigFont.value, sigSize.value, th.tx.withOpacity(.7))))),
       ])),
+      ListTile(leading: const Icon(Icons.hub_rounded), title: const Text('Music providers'),
+          subtitle: const Text('Audius, Jamendo, Internet Archive and your own repo'),
+          onTap: () => providerSheet(c)),
       ListTile(leading: const Icon(Icons.cloud_outlined), title: const Text('Online library (GitHub)'),
           subtitle: ValueListenableBuilder<String?>(valueListenable: repoLink, builder: (_, v, __) => Text(v ?? 'Stream songs from your own repo')),
           onTap: () => repoDialog(c)),
@@ -2232,61 +2674,83 @@ class MixPage extends StatelessWidget {
   }
 }
 
-// ---------------- Online (your GitHub repo) ----------------
+// ---------------- Online: one search across every provider ----------------
 class OnlinePage extends StatefulWidget { const OnlinePage({super.key}); @override State<OnlinePage> createState() => _OnS(); }
 class _OnS extends State<OnlinePage> {
-  String q = '';
+  final tc = TextEditingController();
+  String filter = 'all';
+  @override
+  void initState() {
+    super.initState();
+    if (hub.results.value.isEmpty) { hub.search(''); }
+  }
+  @override
+  void dispose() { tc.dispose(); super.dispose(); }
+  void _go() { setState(() => filter = 'all'); hub.search(tc.text.trim()); }
+
   @override
   Widget build(BuildContext c) {
     Theme.of(c);
-    return SafeArea(bottom: false, child: ValueListenableBuilder<List<Track>>(valueListenable: onlineTracks, builder: (_, all, __) {
-      final link = repoLink.value;
-      final f = [for (final t in all) if ('${t.title} ${t.artist} ${t.album}'.toLowerCase().contains(q.toLowerCase())) t];
+    return SafeArea(bottom: false, child: ValueListenableBuilder<List<Track>>(valueListenable: hub.results, builder: (_, all, __) {
+      final counts = <String, int>{};
+      for (final t in all) { counts[provOf(t)] = (counts[provOf(t)] ?? 0) + 1; }
+      final shown = filter == 'all' ? all : [for (final t in all) if (provOf(t) == filter) t];
+      final playable = [for (final t in shown) if (!isCollection(t)) t];
       final bottom = MediaQuery.paddingOf(c).bottom;
       return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Padding(padding: const EdgeInsets.fromLTRB(20, 8, 8, 0), child: Row(children: [
           const Expanded(child: Text('Online', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w300, letterSpacing: 1))),
-          ValueListenableBuilder<bool>(valueListenable: onlineBusy, builder: (_, busy, __) => busy
+          ValueListenableBuilder<bool>(valueListenable: hub.busy, builder: (_, busy, __) => busy
               ? Padding(padding: const EdgeInsets.all(14), child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: th.ac)))
-              : IconButton(tooltip: 'Refresh', icon: const Icon(Icons.refresh_rounded), onPressed: link == null ? null : () => connectRepo(link))),
-          IconButton(tooltip: 'Connect repo', icon: const Icon(Icons.link_rounded), onPressed: () => repoDialog(c)),
+              : IconButton(tooltip: 'Refresh', icon: const Icon(Icons.refresh_rounded), onPressed: () => hub.search(hub.query))),
+          IconButton(tooltip: 'Providers', icon: const Icon(Icons.tune_rounded), onPressed: () => providerSheet(c)),
         ])),
-        if (link == null)
-          Expanded(child: Center(child: Padding(padding: const EdgeInsets.all(32), child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Icon(Icons.cloud_outlined, size: 64, color: th.ac), const SizedBox(height: 12),
-            const Text('Stream from your repo', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600)), const SizedBox(height: 6),
-            const Text('Connect a public GitHub repo that holds your songs, and play them online. Your local music stays in the Library tab.', textAlign: TextAlign.center),
-            const SizedBox(height: 16),
-            FilledButton.icon(onPressed: () => repoDialog(c), icon: const Icon(Icons.link_rounded), label: const Text('Connect repo')),
-          ]))))
-        else ...[
-          Padding(padding: const EdgeInsets.fromLTRB(16, 4, 16, 6), child: TextField(
-              onChanged: (v) => setState(() => q = v),
-              decoration: InputDecoration(hintText: 'Search online songs', prefixIcon: const Icon(Icons.search), filled: true,
-                  fillColor: th.bg.withOpacity(.55), border: OutlineInputBorder(borderRadius: BorderRadius.circular(28), borderSide: BorderSide.none)))),
-          Padding(padding: const EdgeInsets.fromLTRB(20, 0, 20, 8), child: Text('${all.length} songs · ${link.replaceFirst('https://github.com/', '')}',
-              maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: th.tx.withOpacity(.65)))),
-          if (all.isNotEmpty) Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 6), child: Row(children: [
-            FilledButton.icon(onPressed: () => playList(f.isEmpty ? all : f, 0), icon: const Icon(Icons.play_arrow_rounded), label: const Text('Play all')),
-            const SizedBox(width: 10),
-            OutlinedButton.icon(onPressed: () { final l = [...(f.isEmpty ? all : f)]..shuffle(); playList(l, 0); },
-                icon: const Icon(Icons.shuffle_rounded), label: const Text('Shuffle')),
-          ])),
-          Expanded(child: f.isEmpty
-              ? Center(child: Padding(padding: const EdgeInsets.all(32), child: Text(
-                  all.isEmpty ? 'No songs found in this repo yet. Upload mp3 or flac files, then tap refresh.' : 'No matches.', textAlign: TextAlign.center)))
-              : ListView.builder(padding: EdgeInsets.only(bottom: bottom), itemCount: f.length, itemBuilder: (_, i) {
-                  final t = f[i];
-                  return ListTile(leading: Art(t, 48, 12),
-                      title: Text(t.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600)),
-                      subtitle: Text('${t.artist} · ${t.badge}', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
-                      trailing: ListenableBuilder(listenable: lib, builder: (_, __) => IconButton(
-                          icon: Icon(lib.favs.contains(t.path) ? Icons.favorite : Icons.favorite_border, color: th.ac),
-                          onPressed: () { HapticFeedback.selectionClick(); lib.toggleFav(t); })),
-                      onTap: () => playList(f, i),
-                      onLongPress: () { HapticFeedback.mediumImpact(); trackSheet(c, t); });
-                })),
-        ],
+        Padding(padding: const EdgeInsets.fromLTRB(16, 4, 16, 6), child: TextField(
+            controller: tc, textInputAction: TextInputAction.search, onSubmitted: (_) => _go(),
+            decoration: InputDecoration(hintText: 'Search all providers', prefixIcon: const Icon(Icons.search), filled: true,
+                suffixIcon: IconButton(icon: const Icon(Icons.arrow_forward_rounded), onPressed: _go),
+                fillColor: th.bg.withOpacity(.55), border: OutlineInputBorder(borderRadius: BorderRadius.circular(28), borderSide: BorderSide.none)))),
+        if (counts.isNotEmpty) SizedBox(height: 44, child: ListView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 16), children: [
+          Padding(padding: const EdgeInsets.only(right: 8), child: ChoiceChip(label: Text('All (${all.length})'), selected: filter == 'all', onSelected: (_) => setState(() => filter = 'all'))),
+          for (final e in counts.entries) Padding(padding: const EdgeInsets.only(right: 8), child: ChoiceChip(
+              label: Text('${hub.byId(e.key)?.name ?? e.key} (${e.value})'), selected: filter == e.key, onSelected: (_) => setState(() => filter = e.key))),
+        ])),
+        ValueListenableBuilder<Map<String, String>>(valueListenable: hub.errors, builder: (_, errs, __) {
+          final notes = <String>[
+            for (final e in errs.entries) '${hub.byId(e.key)?.name ?? e.key}: ${e.value}',
+            for (final p in hub.all) if (hub.on(p) && !p.ready) '${p.name} is on but not set up. ${p.setup}.',
+          ];
+          if (notes.isEmpty) return const SizedBox.shrink();
+          return Padding(padding: const EdgeInsets.fromLTRB(20, 2, 20, 4), child: Text(notes.join('\n'), style: TextStyle(fontSize: 11.5, color: th.tx.withOpacity(.65))));
+        }),
+        if (playable.isNotEmpty) Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 6), child: Row(children: [
+          FilledButton.icon(onPressed: () => playList(playable, 0), icon: const Icon(Icons.play_arrow_rounded), label: const Text('Play all')),
+          const SizedBox(width: 10),
+          OutlinedButton.icon(onPressed: () { final x = [...playable]..shuffle(); playList(x, 0); }, icon: const Icon(Icons.shuffle_rounded), label: const Text('Shuffle')),
+        ])),
+        Expanded(child: shown.isEmpty
+            ? ValueListenableBuilder<bool>(valueListenable: hub.busy, builder: (_, busy, __) => Center(child: busy
+                ? CircularProgressIndicator(color: th.ac)
+                : const Padding(padding: EdgeInsets.all(32), child: Text('No results. Try another search, or open Providers to turn sources on.', textAlign: TextAlign.center))))
+            : ListView.builder(padding: EdgeInsets.only(bottom: bottom), itemCount: shown.length, itemBuilder: (_, i) {
+                final t = shown[i];
+                final coll = isCollection(t);
+                final lic = (t.j['lic'] ?? '').toString();
+                final prov = hub.byId(provOf(t))?.name ?? provOf(t);
+                return ListTile(leading: Art(t, 48, 12),
+                    title: Text(t.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600)),
+                    subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(coll ? '${t.artist} · recording' : '${t.artist}${t.album.isEmpty || t.album == prov ? '' : ' · ${t.album}'}', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
+                      Text('$prov${lic.isEmpty ? '' : ' · $lic'}', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11, color: th.ac)),
+                    ]),
+                    trailing: coll
+                        ? Icon(Icons.library_music_outlined, color: th.ac)
+                        : ListenableBuilder(listenable: lib, builder: (_, __) => IconButton(
+                            icon: Icon(lib.favs.contains(t.path) ? Icons.favorite : Icons.favorite_border, color: th.ac),
+                            onPressed: () { HapticFeedback.selectionClick(); lib.toggleFav(t); })),
+                    onTap: () => onlinePlay(shown, i),
+                    onLongPress: coll ? null : () { HapticFeedback.mediumImpact(); trackSheet(c, t); });
+              })),
       ]);
     }));
   }
