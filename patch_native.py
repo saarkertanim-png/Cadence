@@ -3,7 +3,7 @@ root = sys.argv[1]
 mf = f'{root}/android/app/src/main/AndroidManifest.xml'
 s = open(mf).read()
 perms = ''.join(f'<uses-permission android:name="android.permission.{p}"/>' for p in
-  ['WAKE_LOCK','FOREGROUND_SERVICE','FOREGROUND_SERVICE_MEDIA_PLAYBACK','READ_MEDIA_AUDIO','POST_NOTIFICATIONS','REQUEST_IGNORE_BATTERY_OPTIMIZATIONS','SYSTEM_ALERT_WINDOW']) + \
+  ['WAKE_LOCK','FOREGROUND_SERVICE','FOREGROUND_SERVICE_MEDIA_PLAYBACK','READ_MEDIA_AUDIO','POST_NOTIFICATIONS','REQUEST_IGNORE_BATTERY_OPTIMIZATIONS','SYSTEM_ALERT_WINDOW','INTERNET']) + \
   '<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>'
 s = s.replace('<application', perms + '<application', 1)
 s = re.sub(r'android:label="[^"]*"', 'android:label="Cadence"', s, count=1)

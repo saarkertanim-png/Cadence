@@ -205,30 +205,92 @@ final onlineBusy = ValueNotifier<bool>(false);
 
 class RepoRef { final String o, r; final String? b; const RepoRef(this.o, this.r, this.b); }
 RepoRef? parseRepo(String raw) {
-  var x = raw.trim().replaceAll(RegExp(r'^https?://'), '').replaceAll(RegExp(r'^www\.'), '');
-  if (x.startsWith('github.com/')) { x = x.substring(11); }
+  final first = raw.trim().split(RegExp(r'\s+')).first;
+  var x = first.replaceAll(RegExp(r'^https?://'), '').replaceAll(RegExp(r'^www\.'), '');
   x = x.split('?').first.split('#').first;
   final p = x.split('/').where((e) => e.isNotEmpty).toList();
-  if (p.length < 2 || p.first.contains('.')) return null;
+  if (p.isEmpty) return null;
+  if (p.first == 'github.com') {
+    p.removeAt(0);
+  } else if (p.first == 'raw.githubusercontent.com') {
+    p.removeAt(0);
+    if (p.length >= 3) return RepoRef(p[0], p[1], p[2]);
+    return null;
+  } else if (p.first == 'api.github.com') {
+    if (p.length >= 4 && p[1] == 'repos') return RepoRef(p[2], p[3], null);
+    return null;
+  } else if (p.first.contains('.')) {
+    return null;
+  }
+  if (p.length < 2) return null;
   var repo = p[1];
   if (repo.endsWith('.git')) { repo = repo.substring(0, repo.length - 4); }
   final br = (p.length >= 4 && (p[2] == 'tree' || p[2] == 'blob')) ? p[3] : null;
   return RepoRef(p[0], repo, br);
 }
 
+// Follows short links (like share.google) to find the real github.com address.
+Future<String> resolveLink(String raw) async {
+  var u = raw.trim().split(RegExp(r'\s+')).first;
+  for (int i = 0; i < 6; i++) {
+    final uri = Uri.tryParse(u.startsWith('http') ? u : 'https://$u');
+    if (uri == null || uri.host.isEmpty) return u;
+    if (uri.host.endsWith('github.com') || uri.host == 'raw.githubusercontent.com') return u;
+    final c = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      final rq = await c.getUrl(uri);
+      rq.followRedirects = false;
+      rq.headers.set('User-Agent', 'Mozilla/5.0 (Linux; Android 14) Cadence/1.0');
+      final rs = await rq.close().timeout(const Duration(seconds: 10));
+      final loc = rs.headers.value('location');
+      await rs.drain();
+      if (loc == null) return u;
+      u = uri.resolve(loc).toString();
+    } catch (_) {
+      return u;
+    } finally { c.close(force: true); }
+  }
+  return u;
+}
+
+Future<List<dynamic>> _gh(Uri u) async {
+  final c = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+  try {
+    final rq = await c.getUrl(u);
+    rq.headers.set('User-Agent', 'Cadence/1.0');
+    rq.headers.set('Accept', 'application/vnd.github+json');
+    final rs = await rq.close().timeout(const Duration(seconds: 25));
+    final body = await rs.transform(utf8.decoder).join();
+    dynamic j;
+    try { j = jsonDecode(body); } catch (_) {}
+    return [rs.statusCode, j];
+  } finally { c.close(force: true); }
+}
+
 Future<bool> connectRepo(String raw, {bool quiet = false}) async {
-  final ref = parseRepo(raw);
-  if (ref == null) { snack('Paste the repo address, like https://github.com/user/repo'); return false; }
   onlineBusy.value = true;
   try {
-    var branch = ref.b;
-    if (branch == null) {
-      final j = await _getJson(Uri.https('api.github.com', '/repos/${ref.o}/${ref.r}'));
-      if (j is! Map) { if (!quiet) snack('Repo not found. It must be public.'); return false; }
-      branch = (j['default_branch'] ?? 'main').toString();
+    var link = raw.trim();
+    var ref = parseRepo(link);
+    if (ref == null) { link = await resolveLink(link); ref = parseRepo(link); }
+    if (ref == null) {
+      if (!quiet) snack('That is not a GitHub repo address. Open your repo on github.com, copy the address from the browser bar, and paste it here.');
+      return false;
     }
-    final tj = await _getJson(Uri.https('api.github.com', '/repos/${ref.o}/${ref.r}/git/trees/$branch', {'recursive': '1'}));
-    if (tj is! Map || tj['tree'] is! List) { if (!quiet) snack('Could not read that repo.'); return false; }
+    final rf = ref;
+    var branch = rf.b;
+    if (branch == null) {
+      final r = await _gh(Uri.https('api.github.com', '/repos/${rf.o}/${rf.r}'));
+      if (r[0] == 404) { if (!quiet) snack('Repo "${rf.o}/${rf.r}" not found. Check the name, and make sure it is public.'); return false; }
+      if (r[0] == 403 || r[0] == 429) { if (!quiet) snack('GitHub is limiting requests right now. Try again in a few minutes.'); return false; }
+      if (r[0] != 200 || r[1] is! Map) { if (!quiet) snack('GitHub answered with error ${r[0]}.'); return false; }
+      branch = ((r[1] as Map)['default_branch'] ?? 'main').toString();
+    }
+    final tr = await _gh(Uri.https('api.github.com', '/repos/${rf.o}/${rf.r}/git/trees/$branch', {'recursive': '1'}));
+    if (tr[0] == 404) { if (!quiet) snack('Branch "$branch" was not found, or the repo is empty.'); return false; }
+    if (tr[0] == 403 || tr[0] == 429) { if (!quiet) snack('GitHub is limiting requests right now. Try again in a few minutes.'); return false; }
+    final tj = tr[1];
+    if (tr[0] != 200 || tj is! Map || tj['tree'] is! List) { if (!quiet) snack('Could not read that repo (error ${tr[0]}).'); return false; }
     const audio = {'mp3', 'flac', 'm4a', 'aac', 'ogg', 'opus', 'wav'};
     const imgs = {'jpg', 'jpeg', 'png'};
     final files = <Map>[];
@@ -242,7 +304,8 @@ Future<bool> connectRepo(String raw, {bool quiet = false}) async {
       if (audio.contains(ext)) { files.add(e); }
       else if (imgs.contains(ext)) { images.add(path); }
     }
-    String url(String path) => Uri(scheme: 'https', host: 'raw.githubusercontent.com', pathSegments: [ref.o, ref.r, branch!, ...path.split('/')]).toString();
+    final br = branch;
+    String url(String path) => Uri(scheme: 'https', host: 'raw.githubusercontent.com', pathSegments: [rf.o, rf.r, br, ...path.split('/')]).toString();
     final out = <Track>[];
     final byUrl = <String, Track>{};
     onlineCover.clear();
@@ -254,14 +317,15 @@ Future<bool> connectRepo(String raw, {bool quiet = false}) async {
       final dot = file.lastIndexOf('.');
       final base = file.substring(0, dot).replaceAll('_', ' ').trim();
       final ext = file.substring(dot + 1).toUpperCase();
-      final folder = dir.isEmpty ? ref.r : dir.split('/').last;
-      var title = base, artist = dir.isEmpty ? ref.o : folder;
+      final folder = dir.isEmpty ? rf.r : dir.split('/').last;
+      var title = base, artist = dir.isEmpty ? rf.o : folder;
       final sep = base.indexOf(' - ');
       if (sep > 0) { artist = base.substring(0, sep).trim(); title = base.substring(sep + 3).trim(); }
       final u = url(path);
       final stem = path.substring(0, path.lastIndexOf('.'));
+      final pre = dir.isEmpty ? '' : '$dir/';
       String? cover;
-      for (final c in ['$stem.jpg', '$stem.jpeg', '$stem.png', '${dir.isEmpty ? '' : '$dir/'}cover.jpg', '${dir.isEmpty ? '' : '$dir/'}cover.png', '${dir.isEmpty ? '' : '$dir/'}folder.jpg']) {
+      for (final c in ['$stem.jpg', '$stem.jpeg', '$stem.png', '${pre}cover.jpg', '${pre}cover.png', '${pre}folder.jpg']) {
         if (images.contains(c)) { cover = url(c); break; }
       }
       if (cover != null) { onlineCover[u] = cover; }
@@ -272,12 +336,12 @@ Future<bool> connectRepo(String raw, {bool quiet = false}) async {
     out.sort((a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()));
     onlineByUrl..clear()..addAll(byUrl);
     onlineTracks.value = out;
-    repoLink.value = raw.trim();
-    (await SharedPreferences.getInstance()).setString('repo', raw.trim());
-    if (!quiet) { snack(out.isEmpty ? 'Connected, but no songs were found in that repo.' : 'Connected. ${out.length} songs ready to stream.'); }
+    repoLink.value = 'https://github.com/${rf.o}/${rf.r}';
+    (await SharedPreferences.getInstance()).setString('repo', repoLink.value!);
+    if (!quiet) { snack(out.isEmpty ? 'Connected, but no songs were found. Upload mp3 or flac files to the repo, then tap refresh.' : 'Connected. ${out.length} songs ready to stream.'); }
     return true;
   } catch (_) {
-    if (!quiet) snack('Could not connect. Check the link and your internet.');
+    if (!quiet) snack('Could not connect. Check your internet connection and try again.');
     return false;
   } finally { onlineBusy.value = false; }
 }
@@ -479,7 +543,7 @@ void _diagOnce() {
     try {
       final n = await Permission.notification.status;
       final b = await Permission.ignoreBatteryOptimizations.isGranted;
-      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 21');
+      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 22');
     } catch (_) {}
   });
 }
@@ -840,11 +904,11 @@ class GlassBox extends StatelessWidget {
         // 0: Apple-style liquid glass
         return Container(
             decoration: BoxDecoration(borderRadius: r, boxShadow: [BoxShadow(color: Colors.black.withOpacity(d ? .3 : .12), blurRadius: 30, spreadRadius: -4, offset: const Offset(0, 14))]),
-            child: ClipRRect(borderRadius: r, child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 30, sigmaY: 30),
+            child: ClipRRect(borderRadius: r, child: BackdropFilter(filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
                 child: CustomPaint(foregroundPainter: _RimPainter(radius, d),
                     child: Container(
                         decoration: BoxDecoration(borderRadius: r, gradient: fill ?? LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight,
-                            colors: [Colors.white.withOpacity(d ? .09 : .2), Colors.white.withOpacity(d ? .02 : .05)])),
+                            colors: [Colors.white.withOpacity(d ? .06 : .13), Colors.white.withOpacity(d ? .012 : .025)])),
                         child: child)))));
       });
 }
@@ -874,7 +938,7 @@ class _SplashS extends State<Splash> with SingleTickerProviderStateMixin {
           const SizedBox(height: 8),
           Text('DEEP, BLUE AND MIST', style: TextStyle(fontSize: 12, letterSpacing: 5, color: th.tx.withOpacity(.6))),
           const SizedBox(height: 10),
-          Text('build 21', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
+          Text('build 22', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
           const SizedBox(height: 26),
           SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: th.ac)),
         ])))));
@@ -917,6 +981,7 @@ class _HomeS extends State<Home> with WidgetsBindingObserver {
       onDestinationSelected: (v) { HapticFeedback.selectionClick(); setState(() => i = v); },
       destinations: const [
         NavigationDestination(icon: Icon(Icons.library_music_outlined), selectedIcon: Icon(Icons.library_music), label: 'Library'),
+        NavigationDestination(icon: Icon(Icons.cloud_outlined), selectedIcon: Icon(Icons.cloud), label: 'Online'),
         NavigationDestination(icon: Icon(Icons.queue_music_outlined), selectedIcon: Icon(Icons.queue_music), label: 'Mixes'),
         NavigationDestination(icon: Icon(Icons.equalizer_rounded), label: 'Equalizer'),
         NavigationDestination(icon: Icon(Icons.tune_rounded), label: 'Settings'),
@@ -930,7 +995,7 @@ class _HomeS extends State<Home> with WidgetsBindingObserver {
           duration: const Duration(milliseconds: 350),
           transitionBuilder: (w, a) => FadeTransition(opacity: a,
               child: SlideTransition(position: Tween(begin: const Offset(.04, 0), end: Offset.zero).animate(a), child: w)),
-          child: KeyedSubtree(key: ValueKey(i), child: [const LibraryPage(), const MixesTab(), const EqPage(), const SettingsPage()][i])),
+          child: KeyedSubtree(key: ValueKey(i), child: [const LibraryPage(), const OnlinePage(), const MixesTab(), const EqPage(), const SettingsPage()][i])),
       bottomNavigationBar: ValueListenableBuilder<bool>(valueListenable: glassSkin, builder: (_, g, __) => g
           ? SafeArea(top: false, child: Padding(padding: const EdgeInsets.fromLTRB(14, 0, 14, 8), child: Column(mainAxisSize: MainAxisSize.min, children: [
               const MiniPlayer(),
@@ -1172,7 +1237,7 @@ class _LibS extends State<LibraryPage> {
             decoration: InputDecoration(hintText: 'Search songs, artists, albums', prefixIcon: const Icon(Icons.search), filled: true,
                 fillColor: th.bg.withOpacity(.55), border: OutlineInputBorder(borderRadius: BorderRadius.circular(28), borderSide: BorderSide.none)))),
         SizedBox(height: 44, child: ListView(scrollDirection: Axis.horizontal, padding: const EdgeInsets.symmetric(horizontal: 12), children: [
-          for (final e in ['Songs', 'Albums', 'Artists', 'Favorites', 'Playlists', 'Folders', 'Online'].asMap().entries)
+          for (final e in ['Songs', 'Albums', 'Artists', 'Favorites', 'Playlists', 'Folders'].asMap().entries)
             Padding(padding: const EdgeInsets.symmetric(horizontal: 4), child: ChoiceChip(label: Text(e.value), selected: tab == e.key,
                 onSelected: (_) { HapticFeedback.selectionClick(); setState(() => tab = e.key); }))])),
         if (lib.scanning) Padding(padding: const EdgeInsets.fromLTRB(20, 2, 20, 4), child: Text('Found ${lib.found} songs…', style: const TextStyle(fontSize: 12))),
@@ -2164,5 +2229,65 @@ class MixPage extends StatelessWidget {
             onTap: () => playList(x.tracks, i)),
       ]),
     );
+  }
+}
+
+// ---------------- Online (your GitHub repo) ----------------
+class OnlinePage extends StatefulWidget { const OnlinePage({super.key}); @override State<OnlinePage> createState() => _OnS(); }
+class _OnS extends State<OnlinePage> {
+  String q = '';
+  @override
+  Widget build(BuildContext c) {
+    Theme.of(c);
+    return SafeArea(bottom: false, child: ValueListenableBuilder<List<Track>>(valueListenable: onlineTracks, builder: (_, all, __) {
+      final link = repoLink.value;
+      final f = [for (final t in all) if ('${t.title} ${t.artist} ${t.album}'.toLowerCase().contains(q.toLowerCase())) t];
+      final bottom = MediaQuery.paddingOf(c).bottom;
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Padding(padding: const EdgeInsets.fromLTRB(20, 8, 8, 0), child: Row(children: [
+          const Expanded(child: Text('Online', style: TextStyle(fontSize: 30, fontWeight: FontWeight.w300, letterSpacing: 1))),
+          ValueListenableBuilder<bool>(valueListenable: onlineBusy, builder: (_, busy, __) => busy
+              ? Padding(padding: const EdgeInsets.all(14), child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: th.ac)))
+              : IconButton(tooltip: 'Refresh', icon: const Icon(Icons.refresh_rounded), onPressed: link == null ? null : () => connectRepo(link))),
+          IconButton(tooltip: 'Connect repo', icon: const Icon(Icons.link_rounded), onPressed: () => repoDialog(c)),
+        ])),
+        if (link == null)
+          Expanded(child: Center(child: Padding(padding: const EdgeInsets.all(32), child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.cloud_outlined, size: 64, color: th.ac), const SizedBox(height: 12),
+            const Text('Stream from your repo', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600)), const SizedBox(height: 6),
+            const Text('Connect a public GitHub repo that holds your songs, and play them online. Your local music stays in the Library tab.', textAlign: TextAlign.center),
+            const SizedBox(height: 16),
+            FilledButton.icon(onPressed: () => repoDialog(c), icon: const Icon(Icons.link_rounded), label: const Text('Connect repo')),
+          ]))))
+        else ...[
+          Padding(padding: const EdgeInsets.fromLTRB(16, 4, 16, 6), child: TextField(
+              onChanged: (v) => setState(() => q = v),
+              decoration: InputDecoration(hintText: 'Search online songs', prefixIcon: const Icon(Icons.search), filled: true,
+                  fillColor: th.bg.withOpacity(.55), border: OutlineInputBorder(borderRadius: BorderRadius.circular(28), borderSide: BorderSide.none)))),
+          Padding(padding: const EdgeInsets.fromLTRB(20, 0, 20, 8), child: Text('${all.length} songs · ${link.replaceFirst('https://github.com/', '')}',
+              maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: th.tx.withOpacity(.65)))),
+          if (all.isNotEmpty) Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 6), child: Row(children: [
+            FilledButton.icon(onPressed: () => playList(f.isEmpty ? all : f, 0), icon: const Icon(Icons.play_arrow_rounded), label: const Text('Play all')),
+            const SizedBox(width: 10),
+            OutlinedButton.icon(onPressed: () { final l = [...(f.isEmpty ? all : f)]..shuffle(); playList(l, 0); },
+                icon: const Icon(Icons.shuffle_rounded), label: const Text('Shuffle')),
+          ])),
+          Expanded(child: f.isEmpty
+              ? Center(child: Padding(padding: const EdgeInsets.all(32), child: Text(
+                  all.isEmpty ? 'No songs found in this repo yet. Upload mp3 or flac files, then tap refresh.' : 'No matches.', textAlign: TextAlign.center)))
+              : ListView.builder(padding: EdgeInsets.only(bottom: bottom), itemCount: f.length, itemBuilder: (_, i) {
+                  final t = f[i];
+                  return ListTile(leading: Art(t, 48, 12),
+                      title: Text(t.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600)),
+                      subtitle: Text('${t.artist} · ${t.badge}', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
+                      trailing: ListenableBuilder(listenable: lib, builder: (_, __) => IconButton(
+                          icon: Icon(lib.favs.contains(t.path) ? Icons.favorite : Icons.favorite_border, color: th.ac),
+                          onPressed: () { HapticFeedback.selectionClick(); lib.toggleFav(t); })),
+                      onTap: () => playList(f, i),
+                      onLongPress: () { HapticFeedback.mediumImpact(); trackSheet(c, t); });
+                })),
+        ],
+      ]);
+    }));
   }
 }
