@@ -3,7 +3,7 @@ root = sys.argv[1]
 mf = f'{root}/android/app/src/main/AndroidManifest.xml'
 s = open(mf).read()
 perms = ''.join(f'<uses-permission android:name="android.permission.{p}"/>' for p in
-  ['WAKE_LOCK','FOREGROUND_SERVICE','FOREGROUND_SERVICE_MEDIA_PLAYBACK','READ_MEDIA_AUDIO','POST_NOTIFICATIONS','REQUEST_IGNORE_BATTERY_OPTIMIZATIONS','SYSTEM_ALERT_WINDOW','INTERNET']) + \
+  ['WAKE_LOCK','FOREGROUND_SERVICE','FOREGROUND_SERVICE_MEDIA_PLAYBACK','READ_MEDIA_AUDIO','POST_NOTIFICATIONS','REQUEST_IGNORE_BATTERY_OPTIMIZATIONS','SYSTEM_ALERT_WINDOW','INTERNET','RECORD_AUDIO','MODIFY_AUDIO_SETTINGS']) + \
   '<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>'
 s = s.replace('<application', perms + '<application', 1)
 s = re.sub(r'android:label="[^"]*"', 'android:label="Cadence"', s, count=1)
@@ -14,10 +14,85 @@ svc = ('<service android:name="com.ryanheise.audioservice.AudioService" android:
 assert '</application>' in s
 s = s.replace('</application>', svc + '</application>', 1)
 open(mf, 'w').write(s)
+KOTLIN_MAIN = r'''package com.tanimsarker.cadence
+
+import android.media.audiofx.Visualizer
+import android.os.Handler
+import android.os.Looper
+import com.ryanheise.audioservice.AudioServiceActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.EventChannel
+import io.flutter.plugin.common.MethodChannel
+
+class MainActivity : AudioServiceActivity() {
+    private var viz: Visualizer? = null
+    private var sink: EventChannel.EventSink? = null
+    private val ui = Handler(Looper.getMainLooper())
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        val messenger = flutterEngine.dartExecutor.binaryMessenger
+        EventChannel(messenger, "cadence/viz/stream").setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) { sink = events }
+            override fun onCancel(arguments: Any?) { sink = null }
+        })
+        MethodChannel(messenger, "cadence/viz").setMethodCallHandler { call, result ->
+            when (call.method) {
+                "start" -> result.success(startViz(call.argument<Int>("session") ?: 0))
+                "stop" -> { stopViz(); result.success("stopped") }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    private fun startViz(session: Int): String {
+        stopViz()
+        return try {
+            val v = Visualizer(session)
+            val range = Visualizer.getCaptureSizeRange()
+            v.captureSize = Math.min(range[1], 1024)
+            v.setDataCaptureListener(object : Visualizer.OnDataCaptureListener {
+                override fun onWaveFormDataCapture(visualizer: Visualizer?, waveform: ByteArray?, samplingRate: Int) {}
+                override fun onFftDataCapture(visualizer: Visualizer?, fft: ByteArray?, samplingRate: Int) {
+                    if (fft == null || fft.size < 8) return
+                    val n = fft.size / 2
+                    val out = ByteArray(n - 1)
+                    for (k in 1 until n) {
+                        val re = fft[2 * k].toInt()
+                        val im = fft[2 * k + 1].toInt()
+                        val mag = Math.sqrt((re * re + im * im).toDouble())
+                        out[k - 1] = Math.min(255.0, mag * 1.6).toInt().toByte()
+                    }
+                    ui.post { sink?.success(mapOf("fft" to out, "sr" to samplingRate)) }
+                }
+            }, Visualizer.getMaxCaptureRate(), false, true)
+            v.enabled = true
+            viz = v
+            "ok"
+        } catch (e: Exception) {
+            "error: " + (e.message ?: e.toString())
+        }
+    }
+
+    private fun stopViz() {
+        try {
+            viz?.enabled = false
+            viz?.release()
+        } catch (e: Exception) {
+        }
+        viz = null
+    }
+
+    override fun onDestroy() {
+        stopViz()
+        super.onDestroy()
+    }
+}
+'''
 ks = glob.glob(f'{root}/android/app/src/main/kotlin/**/MainActivity.kt', recursive=True)
 assert ks, 'MainActivity.kt not found'
 for k in ks:
-    open(k, 'w').write('package com.tanimsarker.cadence\n\nimport com.ryanheise.audioservice.AudioServiceActivity\n\nclass MainActivity : AudioServiceActivity()\n')
+    open(k, 'w').write(KOTLIN_MAIN)
 pl = f'{root}/ios/Runner/Info.plist'
 p = open(pl).read()
 add = ('<key>UIBackgroundModes</key><array><string>audio</string></array>'

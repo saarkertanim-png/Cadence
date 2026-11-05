@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'dart:convert' show jsonDecode, jsonEncode, utf8;
 import 'dart:io';
 import 'dart:math' as m;
@@ -187,10 +188,10 @@ Future<void> recentAdd(String path) async {
   recents.value = l;
   (await SharedPreferences.getInstance()).setStringList('recent', l);
 }
-Future<String?> askText(BuildContext c, String title, String init, {bool number = false}) {
+Future<String?> askText(BuildContext c, String title, String init, {bool number = false, int maxLen = 30}) {
   final tc = TextEditingController(text: init);
   return showDialog<String>(context: c, builder: (d) => AlertDialog(title: Text(title),
-      content: TextField(controller: tc, autofocus: true, maxLength: 30, keyboardType: number ? TextInputType.number : TextInputType.text),
+      content: TextField(controller: tc, autofocus: true, maxLength: maxLen, keyboardType: number ? TextInputType.number : TextInputType.text),
       actions: [TextButton(onPressed: () => Navigator.pop(d), child: const Text('Cancel')),
         FilledButton(onPressed: () => Navigator.pop(d, tc.text), child: const Text('Save'))]));
 }
@@ -198,6 +199,24 @@ final glassSkin = ValueNotifier<bool>(true);
 final skin = ValueNotifier<int>(0);
 // ---- streaming from the user's own GitHub repo ----
 final repoLink = ValueNotifier<String?>(null);
+// Every connected repo (yours or anyone else's public repo). Each can hold songs and/or a providers.json.
+final repoList = ValueNotifier<List<String>>([]);
+final _repoTracks = <String, List<Track>>{};
+final _repoProvs = <String, List<MusicProvider>>{};
+void _mergeRepos() {
+  final keys = repoList.value;
+  onlineTracks.value = [for (final k in keys) ...(_repoTracks[k] ?? const <Track>[])];
+  hub.json.value = [for (final k in keys) ...(_repoProvs[k] ?? const <MusicProvider>[])];
+  repoLink.value = keys.isEmpty ? null : (keys.length == 1 ? keys.first : '${keys.length} repos');
+}
+Future<void> removeRepo(String key) async {
+  for (final t in _repoTracks[key] ?? const <Track>[]) { onlineByUrl.remove(t.path); onlineCover.remove(t.path); }
+  _repoTracks.remove(key);
+  _repoProvs.remove(key);
+  repoList.value = [for (final k in repoList.value) if (k != key) k];
+  _mergeRepos();
+  (await SharedPreferences.getInstance()).setStringList('repos', repoList.value);
+}
 final onlineTracks = ValueNotifier<List<Track>>([]);
 final onlineByUrl = <String, Track>{};
 final onlineCover = <String, String>{};
@@ -478,13 +497,27 @@ class RepoProvider extends MusicProvider {
 //    No code from the repo is ever run.
 class JsonProvider extends MusicProvider {
   final Map cfg;
-  JsonProvider(this.cfg);
+  final String repo;
+  JsonProvider(this.cfg, this.repo);
   @override
-  String get id => 'json:${cfg['id']}';
+  String get id => 'json:$repo:${cfg['id']}';
   @override
   String get name => (cfg['name'] ?? cfg['id']).toString();
   @override
-  String get blurb => (cfg['description'] ?? 'Provider from your repo').toString();
+  String get blurb => '${(cfg['description'] ?? 'Data-only provider').toString()} (from $repo)';
+  String get hosts {
+    final h = <String>{};
+    for (final k in ['search', 'trending']) {
+      final sp = cfg[k];
+      if (sp is Map) {
+        final u = Uri.tryParse((sp['url'] ?? '').toString());
+        if (u != null && u.host.isNotEmpty) { h.add(u.host); }
+      }
+    }
+    final t = Uri.tryParse((cfg['streamTemplate'] ?? '').toString());
+    if (t != null && t.host.isNotEmpty) { h.add(t.host); }
+    return h.isEmpty ? 'unknown host' : h.join(', ');
+  }
   @override
   IconData get icon => Icons.extension_rounded;
   @override
@@ -537,14 +570,14 @@ class ProviderHub {
   String query = '';
   List<MusicProvider> get all => [...builtIn, ...json.value];
   MusicProvider? byId(String id) { for (final p in all) { if (p.id == id) return p; } return null; }
-  bool on(MusicProvider p) => enabled[p.id] ?? true;
+  bool on(MusicProvider p) => enabled[p.id] ?? (p is! JsonProvider);
   Future<void> setOn(MusicProvider p, bool v) async {
     enabled[p.id] = v;
     (await SharedPreferences.getInstance()).setBool('prov_${p.id}', v);
   }
   Future<void> loadPrefs() async {
     final sp = await SharedPreferences.getInstance();
-    for (final p in all) { enabled[p.id] = sp.getBool('prov_${p.id}') ?? true; }
+    for (final p in all) { enabled[p.id] = sp.getBool('prov_${p.id}') ?? (p is! JsonProvider); }
   }
   // One search across every enabled provider. Results are mixed so no single source takes over.
   Future<void> search(String q) async {
@@ -606,7 +639,7 @@ void providerSheet(BuildContext c) => _sheet(c, StatefulBuilder(builder: (ctx, s
           style: TextStyle(fontSize: 12, color: th.tx.withOpacity(.65)))),
       for (final p in hub.all) Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         SwitchListTile(secondary: Icon(p.icon), title: Text(p.name), isThreeLine: true, value: hub.on(p),
-            subtitle: Text('${p.blurb}\nCan: ${p.caps.join(' · ')}${p.ready ? '' : '\n! ${p.setup}'}'),
+            subtitle: Text('${p.blurb}\nCan: ${p.caps.join(' · ')}${p is JsonProvider ? '\nConnects to ${p.hosts}' : ''}${p.ready ? '' : '\n! ${p.setup}'}'),
             onChanged: (v) async { await hub.setOn(p, v); setS(() {}); }),
         if (p.id == 'jamendo') Padding(padding: const EdgeInsets.only(left: 72), child: TextButton(
             onPressed: () async {
@@ -618,7 +651,7 @@ void providerSheet(BuildContext c) => _sheet(c, StatefulBuilder(builder: (ctx, s
             }, child: Text(jamendoKey.value.isEmpty ? 'Add client ID' : 'Change client ID'))),
         if (p.id == 'repo') Padding(padding: const EdgeInsets.only(left: 72), child: TextButton(
             onPressed: () async { await repoDialog(ctx); setS(() {}); },
-            child: Text(repoLink.value == null ? 'Connect repo' : 'Change repo'))),
+            child: Text(repoLink.value == null ? 'Add repos' : 'Manage repos'))),
       ]),
       const SizedBox(height: 16),
     ]))));
@@ -688,7 +721,7 @@ Future<List<dynamic>> _gh(Uri u) async {
   } finally { c.close(force: true); }
 }
 
-Future<bool> connectRepo(String raw, {bool quiet = false}) async {
+Future<bool> connectRepo(String raw, {bool quiet = false, int depth = 0}) async {
   onlineBusy.value = true;
   try {
     var link = raw.trim();
@@ -720,7 +753,7 @@ Future<bool> connectRepo(String raw, {bool quiet = false}) async {
     for (final e in (tj['tree'] as List)) {
       if (e is! Map || e['type'] != 'blob') continue;
       final path = e['path'].toString();
-      if (path == 'providers.json' || path == 'cadence-providers.json') { provPath = path; continue; }
+      if (path == 'providers.json' || path == 'cadence-providers.json' || path == 'registry.json') { provPath = path; continue; }
       final dot = path.lastIndexOf('.');
       if (dot < 0) continue;
       final ext = path.substring(dot + 1).toLowerCase();
@@ -758,22 +791,45 @@ Future<bool> connectRepo(String raw, {bool quiet = false}) async {
     out.sort((a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()));
     onlineByUrl.addAll(byUrl);
     onlineTracks.value = out;
+    final key = 'https://github.com/${rf.o}/${rf.r}';
+    final tag = '${rf.o}/${rf.r}';
     final extra = <MusicProvider>[];
+    final subRepos = <String>[];
+    var skippedExec = false;
     if (provPath != null) {
       try {
         final pr = await _apiGet(Uri.parse(url(provPath)));
         final pj = pr[1];
-        final plist = pj is Map ? pj['providers'] : pj;
-        if (pr[0] == 200 && plist is List) {
-          for (final e in plist) { if (e is Map && e['id'] != null) { extra.add(JsonProvider(e)); } }
+        if (pr[0] == 200 && pj != null) {
+          if (pj is Map && pj['extensions'] is List) {
+            skippedExec = true;
+          } else {
+            final plist = pj is Map ? pj['providers'] : pj;
+            if (plist is List) {
+              for (final e in plist) { if (e is Map && e['id'] != null) { extra.add(JsonProvider(e, tag)); } }
+            }
+            final rl = pj is Map ? pj['repos'] : null;
+            if (rl is List) { for (final x in rl.take(10)) { if (x is String) { subRepos.add(x); } } }
+          }
         }
       } catch (_) {}
     }
-    hub.json.value = extra;
+    if (skippedExec && out.isEmpty && subRepos.isEmpty) {
+      if (!quiet) snack('That registry lists downloadable extensions. Cadence only supports data-only provider lists and never runs extension code, so nothing was added.');
+      return false;
+    }
+    _repoTracks[key] = out;
+    _repoProvs[key] = extra;
+    if (!repoList.value.contains(key)) { repoList.value = [...repoList.value, key]; }
+    _mergeRepos();
     await hub.loadPrefs();
-    repoLink.value = 'https://github.com/${rf.o}/${rf.r}';
-    (await SharedPreferences.getInstance()).setString('repo', repoLink.value!);
-    if (!quiet) { snack(out.isEmpty && extra.isEmpty ? 'Connected, but no songs or providers.json were found. Upload mp3 or flac files, then tap refresh.' : 'Connected. ${out.length} songs${extra.isEmpty ? '' : ' and ${extra.length} provider${extra.length == 1 ? '' : 's'}'} ready.'); }
+    await (await SharedPreferences.getInstance()).setStringList('repos', repoList.value);
+    if (depth == 0) { for (final r in subRepos) { await connectRepo(r, quiet: true, depth: 1); } }
+    if (!quiet) {
+      snack(out.isEmpty && extra.isEmpty && subRepos.isEmpty
+          ? 'Added $tag, but no songs or providers were found in it.'
+          : 'Added $tag: ${out.length} songs${extra.isEmpty ? '' : ', ${extra.length} provider${extra.length == 1 ? '' : 's'} (switch them on in Providers)'}${subRepos.isEmpty ? '' : ', ${subRepos.length} linked repo${subRepos.length == 1 ? '' : 's'}'}.');
+    }
     return true;
   } catch (_) {
     if (!quiet) snack('Could not connect. Check your internet connection and try again.');
@@ -781,31 +837,34 @@ Future<bool> connectRepo(String raw, {bool quiet = false}) async {
   } finally { onlineBusy.value = false; }
 }
 
-Future<void> disconnectRepo() async {
-  repoLink.value = null;
-  for (final t in onlineTracks.value) { onlineByUrl.remove(t.path); onlineCover.remove(t.path); }
-  onlineTracks.value = [];
-  hub.json.value = [];
-  (await SharedPreferences.getInstance()).remove('repo');
-}
-
 Future<void> repoDialog(BuildContext c) async {
-  final tc = TextEditingController(text: repoLink.value ?? '');
-  final r = await showDialog<String>(context: c, builder: (d) => AlertDialog(
-      title: const Text('Connect your GitHub repo'),
-      content: Column(mainAxisSize: MainAxisSize.min, children: [
-        TextField(controller: tc, autofocus: true, keyboardType: TextInputType.url,
-            decoration: const InputDecoration(hintText: 'https://github.com/user/repo')),
-        const SizedBox(height: 10),
-        const Text('The repo must be public and hold your songs (mp3, flac, m4a, ogg, opus, wav). Name files like "Artist - Title.mp3". A picture with the same name, or cover.jpg in the folder, becomes the cover.', style: TextStyle(fontSize: 12)),
-      ]),
-      actions: [
-        if (repoLink.value != null) TextButton(onPressed: () => Navigator.pop(d, ''), child: const Text('Disconnect')),
-        TextButton(onPressed: () => Navigator.pop(d), child: const Text('Cancel')),
-        FilledButton(onPressed: () => Navigator.pop(d, tc.text), child: const Text('Connect')),
-      ]));
-  if (r == null) return;
-  if (r.isEmpty) { await disconnectRepo(); snack('Disconnected.'); } else { await connectRepo(r); }
+  final tc = TextEditingController();
+  await showDialog<void>(context: c, builder: (d) => StatefulBuilder(builder: (ctx, setS) => AlertDialog(
+      title: const Text('Repositories'),
+      content: SizedBox(width: double.maxFinite, child: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        TextField(controller: tc, keyboardType: TextInputType.url,
+            decoration: InputDecoration(hintText: 'https://github.com/user/repo',
+                suffixIcon: IconButton(icon: const Icon(Icons.add_circle_rounded), onPressed: () async {
+                  final v = tc.text.trim();
+                  if (v.isEmpty) return;
+                  tc.clear();
+                  await connectRepo(v);
+                  setS(() {});
+                }))),
+        const SizedBox(height: 8),
+        ValueListenableBuilder<List<String>>(valueListenable: repoList, builder: (_, l, __) => l.isEmpty
+            ? const Padding(padding: EdgeInsets.symmetric(vertical: 8), child: Text('No repositories yet.'))
+            : Column(mainAxisSize: MainAxisSize.min, children: [
+                for (final k in l) ListTile(dense: true, contentPadding: EdgeInsets.zero, leading: const Icon(Icons.cloud_outlined),
+                    title: Text(k.replaceFirst('https://github.com/', ''), maxLines: 1, overflow: TextOverflow.ellipsis),
+                    subtitle: Text('${_repoTracks[k]?.length ?? 0} songs · ${_repoProvs[k]?.length ?? 0} providers'),
+                    trailing: IconButton(icon: const Icon(Icons.delete_outline_rounded), onPressed: () async { await removeRepo(k); setS(() {}); })),
+              ])),
+        const SizedBox(height: 8),
+        const Text('Add your own repo or any other public repo. Songs: mp3, flac, m4a, ogg, opus or wav, named "Artist - Title.mp3". Providers: a providers.json or registry.json file (data only, and switched off until you turn them on). A registry can also list more repos with "repos". Only add repos with music you are allowed to use.',
+            style: TextStyle(fontSize: 12)),
+      ]))),
+      actions: [TextButton(onPressed: () => Navigator.pop(d), child: const Text('Done'))])));
 }
 final fx = ValueNotifier<int>(0);
 const fxNames = ['Off', 'Sakura petals', 'Neon rain', 'Snow', 'Sparkles', 'Fireflies', 'Film grain'];
@@ -885,9 +944,14 @@ Future<void> main() async {
   skin.value = sp.getInt('skin') ?? 0;
   fx.value = sp.getInt('fx') ?? 0;
   jamendoKey.value = sp.getString('jamendoKey') ?? '';
+  await ytLoadPrefs(sp);
   await hub.loadPrefs();
-  final savedRepo = sp.getString('repo');
-  if (savedRepo != null) { repoLink.value = savedRepo; connectRepo(savedRepo, quiet: true); }
+  final savedRepos = sp.getStringList('repos') ?? [if (sp.getString('repo') != null) sp.getString('repo')!];
+  if (savedRepos.isNotEmpty) {
+    repoList.value = savedRepos;
+    repoLink.value = savedRepos.length == 1 ? savedRepos.first : '${savedRepos.length} repos';
+    Future(() async { for (final r in savedRepos) { await connectRepo(r, quiet: true); } });
+  }
   matchWall.value = sp.getBool('matchWall') ?? false;
   updateWallAccent();
   adaptiveColors.value = sp.getBool('adaptive') ?? false;
@@ -939,6 +1003,7 @@ Future<void> startupPerms() async {
   } catch (_) {}
   permsBusy = false;
   lib.scan();
+  Future.delayed(const Duration(seconds: 10), ytAutoSyncRun);
 }
 
 Route<T> slideUp<T>(Widget w) => PageRouteBuilder<T>(
@@ -980,7 +1045,7 @@ void _diagOnce() {
     try {
       final n = await Permission.notification.status;
       final b = await Permission.ignoreBatteryOptimizations.isGranted;
-      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 24');
+      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 27');
     } catch (_) {}
   });
 }
@@ -1046,7 +1111,7 @@ void _countTimer() {
   final tag = seq[i].tag;
   if (tag is! MediaItem) return;
   _ct = Timer(const Duration(seconds: 20), () {
-    if (player.playing && player.currentIndex == i) { lib.countPlay(tag.id); recentAdd(tag.id); final tr = lib.byPath[tag.id]; if (tr != null) diaryAdd(tr); }
+    if (player.playing && player.currentIndex == i) { lib.countPlay(tag.id); recentAdd(tag.id); final tr = lib.byPath[tag.id]; if (tr != null) { diaryAdd(tr); lbSubmit(tr); } }
   });
 }
 
@@ -1375,7 +1440,7 @@ class _SplashS extends State<Splash> with SingleTickerProviderStateMixin {
           const SizedBox(height: 8),
           Text('DEEP, BLUE AND MIST', style: TextStyle(fontSize: 12, letterSpacing: 5, color: th.tx.withOpacity(.6))),
           const SizedBox(height: 10),
-          Text('build 24', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
+          Text('build 27', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
           const SizedBox(height: 26),
           SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: th.ac)),
         ])))));
@@ -1824,6 +1889,7 @@ class NowPlaying extends StatelessWidget {
                 ]))),
                 if (t != null) ListenableBuilder(listenable: lib, builder: (_, __) =>
                     _Glass(lib.favs.contains(t.path) ? Icons.favorite : Icons.favorite_border, () { HapticFeedback.selectionClick(); lib.toggleFav(t); })),
+                if (t != null) _Glass(Icons.blur_on_rounded, () => openPortal(c)),
                 if (t != null) _Glass(Icons.lyrics_rounded, () => Navigator.push(c, slideUp(const LyricsPage()))),
                 if (t != null) _Glass(Icons.graphic_eq_rounded, () => infoSheet(c, t)),
               ]),
@@ -1863,6 +1929,7 @@ void _sheet(BuildContext c, Widget w) => showModalBottomSheet(context: c, showDr
     backgroundColor: th.bg, builder: (_) => Padding(padding: const EdgeInsets.fromLTRB(22, 0, 22, 28), child: w));
 
 void moreSheet(BuildContext c, Track t) => _sheet(c, Column(mainAxisSize: MainAxisSize.min, children: [
+      ListTile(leading: const Icon(Icons.blur_on_rounded), title: const Text('Live Sonic Portal'), subtitle: const Text('Music in 3D, reacting to the real audio'), onTap: () { Navigator.pop(c); openPortal(c); }),
       ListTile(leading: const Icon(Icons.lyrics_rounded), title: const Text('Lyrics'), onTap: () { Navigator.pop(c); Navigator.push(c, slideUp(const LyricsPage())); }),
       ListTile(leading: const Icon(Icons.info_outline), title: const Text('Audio information'), onTap: () { Navigator.pop(c); infoSheet(c, t); }),
       ListTile(leading: const Icon(Icons.hourglass_bottom_rounded), title: const Text('Time capsule'), subtitle: const Text('Hide this song with a note for later'), onTap: () { Navigator.pop(c); capsuleSheet(c, t); }),
@@ -2148,6 +2215,9 @@ class SettingsPage extends StatelessWidget {
         Center(child: Padding(padding: const EdgeInsets.only(bottom: 8),
             child: Text(sigText.value, style: sigStyle(sigFont.value, sigSize.value, th.tx.withOpacity(.7))))),
       ])),
+      ListTile(leading: const Icon(Icons.sync_rounded), title: const Text('YouTube & Sync'),
+          subtitle: const Text('Import your YouTube playlists and share your listening history'),
+          onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const YouTubeSyncPage()))),
       ListTile(leading: const Icon(Icons.hub_rounded), title: const Text('Music providers'),
           subtitle: const Text('Audius, Jamendo, Internet Archive and your own repo'),
           onTap: () => providerSheet(c)),
@@ -2755,3 +2825,1159 @@ class _OnS extends State<OnlinePage> {
     }));
   }
 }
+
+// ---------------- YouTube & Sync (official YouTube Data API) + ListenBrainz ----------------
+// Sign-in uses Google's official "device" OAuth flow, so no browser plugin or app signing key is needed.
+// Cadence only READS your YouTube playlists. It never plays YouTube audio and never writes to your account.
+final ytClientId = ValueNotifier<String>('');
+final ytClientSecret = ValueNotifier<String>('');
+final ytChannel = ValueNotifier<Map<String, dynamic>?>(null);
+final ytSelected = ValueNotifier<List<String>>([]);
+final ytAutoSync = ValueNotifier<bool>(false);
+final ytLocalName = <String, String>{};
+final lbToken = ValueNotifier<String>('');
+final lbOn = ValueNotifier<bool>(false);
+String _ytAccess = '', _ytRefresh = '';
+int _ytExp = 0;
+bool ytCancel = false;
+
+class DeviceCode {
+  final String device, user, url; final int interval, expires;
+  const DeviceCode(this.device, this.user, this.url, this.interval, this.expires);
+}
+
+Future<List<dynamic>> _postForm(Uri u, Map<String, String> body) async {
+  final c = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+  try {
+    final rq = await c.postUrl(u);
+    rq.headers.set('Content-Type', 'application/x-www-form-urlencoded');
+    rq.headers.set('User-Agent', 'Cadence/1.0');
+    rq.write(body.entries.map((e) => '${Uri.encodeQueryComponent(e.key)}=${Uri.encodeQueryComponent(e.value)}').join('&'));
+    final rs = await rq.close().timeout(const Duration(seconds: 25));
+    final txt = await rs.transform(utf8.decoder).join();
+    dynamic j;
+    try { j = jsonDecode(txt); } catch (_) {}
+    return [rs.statusCode, j];
+  } finally { c.close(force: true); }
+}
+
+Future<void> ytSavePrefs() async {
+  final sp = await SharedPreferences.getInstance();
+  await sp.setStringList('ytSelected', ytSelected.value);
+  await sp.setString('ytMap', jsonEncode(ytLocalName));
+  await sp.setBool('ytAuto', ytAutoSync.value);
+  await sp.setBool('lbOn', lbOn.value);
+  await sp.setString('lbToken', lbToken.value);
+  await sp.setString('ytClient', ytClientId.value);
+  await sp.setString('ytSecret', ytClientSecret.value);
+}
+
+Future<void> ytLoadPrefs(SharedPreferences sp) async {
+  ytClientId.value = sp.getString('ytClient') ?? '';
+  ytClientSecret.value = sp.getString('ytSecret') ?? '';
+  _ytAccess = sp.getString('ytAccess') ?? '';
+  _ytRefresh = sp.getString('ytRefresh') ?? '';
+  _ytExp = sp.getInt('ytExp') ?? 0;
+  ytSelected.value = sp.getStringList('ytSelected') ?? [];
+  ytAutoSync.value = sp.getBool('ytAuto') ?? false;
+  lbOn.value = sp.getBool('lbOn') ?? false;
+  lbToken.value = sp.getString('lbToken') ?? '';
+  try {
+    final m = jsonDecode(sp.getString('ytMap') ?? '{}') as Map;
+    for (final e in m.entries) { ytLocalName[e.key.toString()] = e.value.toString(); }
+    final ch = sp.getString('ytChannel');
+    if (ch != null && _ytRefresh.isNotEmpty) { ytChannel.value = Map<String, dynamic>.from(jsonDecode(ch) as Map); }
+  } catch (_) {}
+}
+
+Future<void> _ytStoreTokens(Map j) async {
+  _ytAccess = j['access_token'].toString();
+  _ytExp = DateTime.now().millisecondsSinceEpoch + (((j['expires_in'] as num?)?.toInt() ?? 3600) - 60) * 1000;
+  if (j['refresh_token'] != null) { _ytRefresh = j['refresh_token'].toString(); }
+  final sp = await SharedPreferences.getInstance();
+  await sp.setString('ytAccess', _ytAccess);
+  await sp.setInt('ytExp', _ytExp);
+  await sp.setString('ytRefresh', _ytRefresh);
+}
+
+Future<void> ytSignOut() async {
+  final tok = _ytRefresh.isNotEmpty ? _ytRefresh : _ytAccess;
+  _ytAccess = ''; _ytRefresh = ''; _ytExp = 0;
+  ytChannel.value = null;
+  final sp = await SharedPreferences.getInstance();
+  await sp.remove('ytAccess'); await sp.remove('ytRefresh'); await sp.remove('ytExp'); await sp.remove('ytChannel');
+  if (tok.isNotEmpty) { try { await _postForm(Uri.https('oauth2.googleapis.com', '/revoke'), {'token': tok}); } catch (_) {} }
+}
+
+Future<DeviceCode> ytStartLogin() async {
+  final r = await _postForm(Uri.https('oauth2.googleapis.com', '/device/code'),
+      {'client_id': ytClientId.value.trim(), 'scope': 'https://www.googleapis.com/auth/youtube.readonly'});
+  final j = r[1];
+  if (r[0] != 200 || j is! Map) {
+    throw (j is Map ? (j['error_description'] ?? j['error'] ?? 'error ${r[0]}') : 'error ${r[0]}').toString();
+  }
+  return DeviceCode(j['device_code'].toString(), j['user_code'].toString(),
+      (j['verification_url'] ?? 'https://www.google.com/device').toString(), (j['interval'] as num?)?.toInt() ?? 5, (j['expires_in'] as num?)?.toInt() ?? 1800);
+}
+
+Future<void> ytPoll(DeviceCode d) async {
+  final end = DateTime.now().add(Duration(seconds: d.expires));
+  var every = d.interval;
+  while (DateTime.now().isBefore(end)) {
+    await Future.delayed(Duration(seconds: every));
+    if (ytCancel) throw 'cancelled';
+    final r = await _postForm(Uri.https('oauth2.googleapis.com', '/token'), {
+      'client_id': ytClientId.value.trim(), 'client_secret': ytClientSecret.value.trim(),
+      'device_code': d.device, 'grant_type': 'urn:ietf:params:oauth:grant-type:device_code'});
+    final j = r[1];
+    if (j is Map && j['access_token'] != null) { await _ytStoreTokens(j); return; }
+    final err = j is Map ? j['error']?.toString() : null;
+    if (err == 'authorization_pending') continue;
+    if (err == 'slow_down') { every += 5; continue; }
+    throw (err == 'access_denied' ? 'Access was denied.' : (j is Map ? (j['error_description'] ?? err ?? 'Sign-in failed') : 'Sign-in failed')).toString();
+  }
+  throw 'The code expired. Please try again.';
+}
+
+Future<String> _ytToken() async {
+  if (_ytAccess.isNotEmpty && DateTime.now().millisecondsSinceEpoch < _ytExp) return _ytAccess;
+  if (_ytRefresh.isEmpty) throw 'You are not signed in to YouTube.';
+  final r = await _postForm(Uri.https('oauth2.googleapis.com', '/token'), {
+    'client_id': ytClientId.value.trim(), 'client_secret': ytClientSecret.value.trim(),
+    'refresh_token': _ytRefresh, 'grant_type': 'refresh_token'});
+  final j = r[1];
+  if (r[0] != 200 || j is! Map || j['access_token'] == null) {
+    if (j is Map && j['error'] == 'invalid_grant') { await ytSignOut(); throw 'Your YouTube sign-in expired. Please sign in again.'; }
+    throw 'Could not refresh the YouTube sign-in.';
+  }
+  await _ytStoreTokens(j);
+  return _ytAccess;
+}
+
+Future<Map> _ytGet(String path, Map<String, String> qp) async {
+  final tok = await _ytToken();
+  final c = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+  try {
+    final rq = await c.getUrl(Uri.https('www.googleapis.com', '/youtube/v3/$path', qp));
+    rq.headers.set('Authorization', 'Bearer $tok');
+    rq.headers.set('User-Agent', 'Cadence/1.0');
+    final rs = await rq.close().timeout(const Duration(seconds: 25));
+    final txt = await rs.transform(utf8.decoder).join();
+    dynamic j;
+    try { j = jsonDecode(txt); } catch (_) {}
+    if (rs.statusCode != 200 || j is! Map) {
+      final m = (j is Map && j['error'] is Map) ? ((j['error'] as Map)['message'] ?? 'error ${rs.statusCode}') : 'error ${rs.statusCode}';
+      throw m.toString();
+    }
+    return j;
+  } finally { c.close(force: true); }
+}
+
+String _thumb(dynamic sn) {
+  if (sn is! Map || sn['thumbnails'] is! Map) return '';
+  final t = sn['thumbnails'] as Map;
+  for (final k in ['medium', 'default', 'high']) { if (t[k] is Map && (t[k] as Map)['url'] != null) { return (t[k] as Map)['url'].toString(); } }
+  return '';
+}
+
+Future<void> ytLoadChannel() async {
+  final j = await _ytGet('channels', {'part': 'snippet,statistics', 'mine': 'true'});
+  final items = j['items'];
+  if (items is List && items.isNotEmpty && items.first is Map) {
+    final e = items.first as Map;
+    final sn = e['snippet'] is Map ? e['snippet'] as Map : <dynamic, dynamic>{};
+    final st = e['statistics'] is Map ? e['statistics'] as Map : <dynamic, dynamic>{};
+    final ch = <String, dynamic>{'id': e['id']?.toString() ?? '', 'title': (sn['title'] ?? 'YouTube').toString(),
+      'handle': (sn['customUrl'] ?? '').toString(), 'thumb': _thumb(sn), 'subs': st['subscriberCount']?.toString() ?? '', 'videos': st['videoCount']?.toString() ?? ''};
+    ytChannel.value = ch;
+    (await SharedPreferences.getInstance()).setString('ytChannel', jsonEncode(ch));
+  } else {
+    throw 'No YouTube channel was found on this Google account.';
+  }
+}
+
+Future<List<Map<String, dynamic>>> ytPlaylists() async {
+  final out = <Map<String, dynamic>>[];
+  String? page;
+  do {
+    final j = await _ytGet('playlists', {'part': 'snippet,contentDetails', 'mine': 'true', 'maxResults': '50', if (page != null) 'pageToken': page});
+    final items = j['items'];
+    if (items is List) {
+      for (final e in items) {
+        if (e is! Map) continue;
+        final sn = e['snippet'] is Map ? e['snippet'] as Map : <dynamic, dynamic>{};
+        final cd = e['contentDetails'] is Map ? e['contentDetails'] as Map : <dynamic, dynamic>{};
+        out.add({'id': e['id'].toString(), 'title': (sn['title'] ?? 'Playlist').toString(), 'count': (cd['itemCount'] as num?)?.toInt() ?? 0, 'thumb': _thumb(sn)});
+      }
+    }
+    page = j['nextPageToken']?.toString();
+  } while (page != null && out.length < 200);
+  return out;
+}
+
+Future<List<Map<String, String>>> ytItems(String playlistId) async {
+  final out = <Map<String, String>>[];
+  String? page;
+  do {
+    final j = await _ytGet('playlistItems', {'part': 'snippet', 'playlistId': playlistId, 'maxResults': '50', if (page != null) 'pageToken': page});
+    final items = j['items'];
+    if (items is List) {
+      for (final e in items) {
+        if (e is! Map || e['snippet'] is! Map) continue;
+        final sn = e['snippet'] as Map;
+        final title = (sn['title'] ?? '').toString();
+        if (title == 'Private video' || title == 'Deleted video' || title.isEmpty) continue;
+        out.add({'title': title, 'owner': (sn['videoOwnerChannelTitle'] ?? '').toString()});
+      }
+    }
+    page = j['nextPageToken']?.toString();
+  } while (page != null && out.length < 500);
+  return out;
+}
+
+Set<String> _words(String s) {
+  var x = s.toLowerCase().replaceAll(RegExp(r'\(.*?\)|\[.*?\]'), ' ');
+  x = x.replaceAll(RegExp(r'\b(official|video|audio|lyrics|lyric|music|hd|hq|4k|remastered|feat|ft|topic|vevo)\b'), ' ');
+  x = x.replaceAll(RegExp(r'[^\p{L}\p{N} ]', unicode: true), ' ');
+  return x.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toSet();
+}
+
+class ImportResult {
+  final int total, matched; final List<String> missing; final String name;
+  const ImportResult(this.total, this.matched, this.missing, this.name);
+}
+
+// Copies a YouTube playlist into Cadence by matching each video to a song you already have on your phone.
+Future<ImportResult> ytImport(String playlistId, String title) async {
+  final items = await ytItems(playlistId);
+  final cands = <List<dynamic>>[for (final t in lib.tracks) [t, _words(t.title), _words(t.artist)]];
+  final picked = <String>[];
+  final missing = <String>[];
+  var n = 0;
+  for (final it in items) {
+    final iw = _words('${it['title']} ${it['owner']}');
+    Track? best;
+    var bestScore = 0.0;
+    for (final c in cands) {
+      final tw = c[1] as Set<String>, aw = c[2] as Set<String>;
+      if (tw.isEmpty || !iw.containsAll(tw)) continue;
+      final artistOk = aw.isEmpty || (c[0] as Track).artist.startsWith('Unknown') || aw.any(iw.contains);
+      if (!artistOk) continue;
+      final score = tw.length / (iw.length + 1);
+      if (score > bestScore) { bestScore = score; best = c[0] as Track; }
+    }
+    if (best != null && bestScore >= .2) { if (!picked.contains(best.path)) { picked.add(best.path); } } else { missing.add(it['title'] ?? ''); }
+    if (++n % 25 == 0) { await Future.delayed(Duration.zero); }
+  }
+  final name = ytLocalName[playlistId] ?? 'YT - $title';
+  ytLocalName[playlistId] = name;
+  if (!lib.playlists.containsKey(name)) { await lib.newPlaylist(name); }
+  for (final p in [...?lib.playlists[name]]) { if (!picked.contains(p)) { await lib.removeFrom(name, p); } }
+  for (final p in picked) { await lib.addTo(name, p); }
+  await ytSavePrefs();
+  return ImportResult(items.length, picked.length, missing, name);
+}
+
+Future<void> ytAutoSyncRun() async {
+  if (!ytAutoSync.value || _ytRefresh.isEmpty || ytSelected.value.isEmpty) return;
+  final sp = await SharedPreferences.getInstance();
+  final last = sp.getInt('ytLast') ?? 0;
+  if (DateTime.now().millisecondsSinceEpoch - last < 6 * 3600 * 1000) return;
+  try {
+    final pls = await ytPlaylists();
+    for (final id in ytSelected.value) {
+      final p = pls.where((e) => e['id'] == id).toList();
+      if (p.isNotEmpty) { await ytImport(id, p.first['title'].toString()); }
+    }
+    await sp.setInt('ytLast', DateTime.now().millisecondsSinceEpoch);
+  } catch (_) {}
+}
+
+// ListenBrainz: an open service that keeps your listening history. Uses its official API and your own token.
+Future<void> lbSubmit(Track t) async {
+  if (!lbOn.value || lbToken.value.trim().isEmpty || t.artist.startsWith('Unknown')) return;
+  final c = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+  try {
+    final rq = await c.postUrl(Uri.https('api.listenbrainz.org', '/1/submit-listens'));
+    rq.headers.set('Authorization', 'Token ${lbToken.value.trim()}');
+    rq.headers.set('Content-Type', 'application/json');
+    rq.write(jsonEncode({'listen_type': 'single', 'payload': [{
+      'listened_at': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      'track_metadata': {'artist_name': t.artist, 'track_name': t.title, if (!t.album.startsWith('Unknown')) 'release_name': t.album}}]}));
+    final rs = await rq.close().timeout(const Duration(seconds: 15));
+    await rs.drain();
+  } catch (_) {
+  } finally { c.close(force: true); }
+}
+
+Future<String?> lbValidate(String token) async {
+  final c = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+  try {
+    final rq = await c.getUrl(Uri.https('api.listenbrainz.org', '/1/validate-token'));
+    rq.headers.set('Authorization', 'Token ${token.trim()}');
+    final rs = await rq.close().timeout(const Duration(seconds: 15));
+    final txt = await rs.transform(utf8.decoder).join();
+    final j = jsonDecode(txt);
+    if (j is Map && j['valid'] == true) { return (j['user_name'] ?? 'ListenBrainz').toString(); }
+  } catch (_) {
+  } finally { c.close(force: true); }
+  return null;
+}
+
+Widget ycard(IconData ic, String title, String sub, {Widget? trailing, Widget? leading, VoidCallback? onTap}) => Padding(
+    padding: const EdgeInsets.only(bottom: 8),
+    child: Material(color: th.ac.withOpacity(.09), borderRadius: BorderRadius.circular(26), clipBehavior: Clip.antiAlias,
+        child: InkWell(onTap: onTap, child: Padding(padding: const EdgeInsets.fromLTRB(16, 14, 14, 14), child: Row(children: [
+          leading ?? Container(width: 52, height: 52, decoration: BoxDecoration(color: th.ac.withOpacity(.16), borderRadius: BorderRadius.circular(18)), child: Icon(ic, color: th.ac)),
+          const SizedBox(width: 14),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w500)),
+            if (sub.isNotEmpty) Text(sub, maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 13, color: th.tx.withOpacity(.65))),
+          ])),
+          if (trailing != null) trailing,
+        ])))));
+
+Future<bool> ytSetupDialog(BuildContext c) async {
+  final id = TextEditingController(text: ytClientId.value), sec = TextEditingController(text: ytClientSecret.value);
+  final ok = await showDialog<bool>(context: c, builder: (d) => AlertDialog(
+      title: const Text('Google setup'),
+      content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('Google needs your own free API keys, one time:\n'
+            '1. Go to console.cloud.google.com and create a project.\n'
+            '2. APIs and services: enable "YouTube Data API v3".\n'
+            '3. OAuth consent screen: choose External and add your own Google account as a test user.\n'
+            '4. Credentials: create an OAuth client ID of type "TVs and Limited Input devices".\n'
+            '5. Paste the Client ID and Client secret below.', style: TextStyle(fontSize: 12)),
+        const SizedBox(height: 10),
+        TextField(controller: id, decoration: const InputDecoration(labelText: 'Client ID')),
+        TextField(controller: sec, decoration: const InputDecoration(labelText: 'Client secret')),
+      ])),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(d, false), child: const Text('Cancel')),
+        FilledButton(onPressed: () => Navigator.pop(d, true), child: const Text('Save')),
+      ]));
+  if (ok == true && id.text.trim().isNotEmpty && sec.text.trim().isNotEmpty) {
+    ytClientId.value = id.text.trim();
+    ytClientSecret.value = sec.text.trim();
+    await ytSavePrefs();
+    return true;
+  }
+  return false;
+}
+
+Future<void> ytConnectFlow(BuildContext c) async {
+  if (ytClientId.value.trim().isEmpty || ytClientSecret.value.trim().isEmpty) {
+    final ok = await ytSetupDialog(c);
+    if (!ok || !c.mounted) return;
+  }
+  BuildContext? dlg;
+  try {
+    final d = await ytStartLogin();
+    ytCancel = false;
+    if (!c.mounted) return;
+    showDialog<void>(context: c, barrierDismissible: false, builder: (dc) {
+      dlg = dc;
+      return AlertDialog(
+          title: const Text('Sign in with Google'),
+          content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('1. On any phone or computer, open\n${d.url}'),
+            const SizedBox(height: 10),
+            const Text('2. Enter this code:'),
+            const SizedBox(height: 6),
+            SelectableText(d.user, style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w700, letterSpacing: 3)),
+            const SizedBox(height: 14),
+            const Row(children: [SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)), SizedBox(width: 10), Expanded(child: Text('Waiting for you to finish…'))]),
+          ]),
+          actions: [TextButton(onPressed: () { ytCancel = true; Navigator.pop(dc); }, child: const Text('Cancel'))]);
+    });
+    await ytPoll(d);
+    final dc = dlg;
+    if (dc != null && dc.mounted) { Navigator.pop(dc); }
+    await ytLoadChannel();
+    snack('Connected as ${ytChannel.value?['title'] ?? 'your account'}.');
+  } catch (e) {
+    final dc = dlg;
+    if (dc != null && dc.mounted) { Navigator.pop(dc); }
+    if (e.toString() != 'cancelled') { snack('YouTube sign-in failed: $e'); }
+  }
+}
+
+Future<void> ytPickPlaylists(BuildContext c, {required bool sync}) async {
+  List<Map<String, dynamic>> pls;
+  try {
+    snack('Loading your playlists…');
+    pls = await ytPlaylists();
+  } catch (e) { snack('Could not load playlists: $e'); return; }
+  if (!c.mounted) return;
+  _sheet(c, StatefulBuilder(builder: (ctx, setS) => SizedBox(
+      height: MediaQuery.sizeOf(ctx).height * .7,
+      child: ListView(children: [
+        Padding(padding: const EdgeInsets.fromLTRB(20, 6, 20, 2), child: Text(sync ? 'Select playlists to sync' : 'Make a playlist local',
+            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600))),
+        Padding(padding: const EdgeInsets.fromLTRB(20, 0, 20, 8), child: Text(
+            'Cadence plays music files on your phone, so each video is matched to a song you already have. Songs you do not have are listed, not played.',
+            style: TextStyle(fontSize: 12, color: th.tx.withOpacity(.65)))),
+        if (pls.isEmpty) const Padding(padding: EdgeInsets.all(24), child: Text('No playlists were found on this account.')),
+        for (final p in pls)
+          sync
+              ? CheckboxListTile(
+                  value: ytSelected.value.contains(p['id']), title: Text(p['title'].toString(), maxLines: 1, overflow: TextOverflow.ellipsis),
+                  subtitle: Text('${p['count']} videos'),
+                  onChanged: (v) async {
+                    final id = p['id'].toString();
+                    ytSelected.value = v == true ? [...ytSelected.value, id] : [for (final x in ytSelected.value) if (x != id) x];
+                    await ytSavePrefs();
+                    setS(() {});
+                    if (v == true) {
+                      try {
+                        final r = await ytImport(id, p['title'].toString());
+                        snack('${r.name}: matched ${r.matched} of ${r.total} songs.');
+                      } catch (e) { snack('Could not import: $e'); }
+                    }
+                  })
+              : ListTile(
+                  leading: const Icon(Icons.queue_music_rounded), title: Text(p['title'].toString(), maxLines: 1, overflow: TextOverflow.ellipsis),
+                  subtitle: Text('${p['count']} videos'),
+                  onTap: () async {
+                    Navigator.pop(ctx);
+                    snack('Matching "${p['title']}" to your library…');
+                    try {
+                      final r = await ytImport(p['id'].toString(), p['title'].toString());
+                      if (!c.mounted) return;
+                      showDialog<void>(context: c, builder: (d) => AlertDialog(
+                          title: Text('Saved "${r.name}"'),
+                          content: SingleChildScrollView(child: Text('Matched ${r.matched} of ${r.total} songs.'
+                              '${r.missing.isEmpty ? '' : '\n\nNot in your library:\n${r.missing.take(25).join('\n')}${r.missing.length > 25 ? '\n…and ${r.missing.length - 25} more' : ''}'}')),
+                          actions: [TextButton(onPressed: () => Navigator.pop(d), child: const Text('OK'))]));
+                    } catch (e) { snack('Could not import: $e'); }
+                  }),
+      ]))));
+}
+
+class YouTubeSyncPage extends StatelessWidget {
+  const YouTubeSyncPage({super.key});
+  @override
+  Widget build(BuildContext c) {
+    Theme.of(c);
+    return Scaffold(
+      appBar: AppBar(title: const Text('YouTube & Sync'), backgroundColor: Colors.transparent),
+      body: ListenableBuilder(
+          listenable: Listenable.merge([ytChannel, ytSelected, ytAutoSync, lbOn, lbToken, ytClientId]),
+          builder: (_, __) {
+            final ch = ytChannel.value;
+            return ListView(padding: const EdgeInsets.fromLTRB(16, 4, 16, 32), children: [
+              Padding(padding: const EdgeInsets.fromLTRB(8, 8, 8, 10), child: Text('YouTube', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: th.ac))),
+              if (ch == null)
+                ycard(Icons.play_circle_rounded, 'YouTube account', 'Sign in with Google to see your playlists',
+                    trailing: FilledButton(onPressed: () => ytConnectFlow(c), child: const Text('Connect')), onTap: () => ytConnectFlow(c))
+              else
+                ycard(Icons.person_rounded, ch['title'].toString(), (ch['handle'] ?? '').toString().isEmpty ? 'YouTube account' : ch['handle'].toString(),
+                    leading: ClipRRect(borderRadius: BorderRadius.circular(18), child: SizedBox(width: 52, height: 52, child: (ch['thumb'] ?? '').toString().isEmpty
+                        ? Icon(Icons.person_rounded, color: th.ac)
+                        : Image.network(ch['thumb'].toString(), fit: BoxFit.cover, errorBuilder: (_, __, ___) => Icon(Icons.person_rounded, color: th.ac)))),
+                    trailing: IconButton(tooltip: 'Sign out', icon: const Icon(Icons.logout_rounded), onPressed: () async {
+                      await ytSignOut();
+                      snack('Signed out of YouTube.');
+                    })),
+              if (ch != null) ...[
+                ycard(Icons.sync_rounded, 'Keep playlists up to date', 'Selected playlists are refreshed from YouTube about every 6 hours',
+                    trailing: Switch(value: ytAutoSync.value, onChanged: (v) async { ytAutoSync.value = v; await ytSavePrefs(); })),
+                ycard(Icons.video_library_rounded, 'YouTube channel', '${ch['title']}${(ch['subs'] ?? '').toString().isEmpty ? '' : ' · ${ch['subs']} subscribers'}',
+                    trailing: const Icon(Icons.chevron_right_rounded), onTap: () => showDialog<void>(context: c, builder: (d) => AlertDialog(
+                        title: Text(ch['title'].toString()),
+                        content: Text('${(ch['handle'] ?? '').toString().isEmpty ? '' : '${ch['handle']}\n'}'
+                            '${(ch['subs'] ?? '').toString().isEmpty ? '' : '${ch['subs']} subscribers\n'}'
+                            '${(ch['videos'] ?? '').toString().isEmpty ? '' : '${ch['videos']} videos'}'),
+                        actions: [TextButton(onPressed: () => Navigator.pop(d), child: const Text('OK'))]))),
+                ycard(Icons.checklist_rounded, 'Select playlists to sync', ytSelected.value.isEmpty ? 'None selected' : '${ytSelected.value.length} playlists syncing',
+                    trailing: const Icon(Icons.chevron_right_rounded), onTap: () => ytPickPlaylists(c, sync: true)),
+                ycard(Icons.queue_music_rounded, 'Make YouTube playlists local', 'Match a playlist to songs you have and save a copy',
+                    trailing: const Icon(Icons.chevron_right_rounded), onTap: () => ytPickPlaylists(c, sync: false)),
+              ],
+              ycard(Icons.vpn_key_rounded, 'Google setup', ytClientId.value.isEmpty ? 'Add your free API keys (one time)' : 'API keys saved',
+                  trailing: const Icon(Icons.chevron_right_rounded), onTap: () => ytSetupDialog(c)),
+              Padding(padding: const EdgeInsets.fromLTRB(8, 18, 8, 10), child: Text('Listening history', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: th.ac))),
+              ycard(Icons.history_rounded, 'Send plays to ListenBrainz', lbOn.value ? 'On · each song you listen to is added to your history' : 'Off',
+                  trailing: Switch(value: lbOn.value, onChanged: (v) async {
+                    if (v && lbToken.value.trim().isEmpty) { snack('Add your ListenBrainz token first.'); return; }
+                    lbOn.value = v;
+                    await ytSavePrefs();
+                  })),
+              ycard(Icons.key_rounded, 'ListenBrainz token', lbToken.value.isEmpty ? 'Copy it from listenbrainz.org/settings' : 'Token saved',
+                  trailing: const Icon(Icons.chevron_right_rounded), onTap: () async {
+                    final v = await askText(c, 'ListenBrainz token', lbToken.value, maxLen: 60);
+                    if (v == null) return;
+                    final name = v.trim().isEmpty ? null : await lbValidate(v);
+                    if (v.trim().isNotEmpty && name == null) { snack('That token was not accepted by ListenBrainz.'); return; }
+                    lbToken.value = v.trim();
+                    if (v.trim().isEmpty) { lbOn.value = false; }
+                    await ytSavePrefs();
+                    snack(name == null ? 'Token removed.' : 'Connected to ListenBrainz as $name.');
+                  }),
+              Padding(padding: const EdgeInsets.fromLTRB(8, 14, 8, 0), child: Text(
+                  'Cadence only reads your YouTube playlists and never plays YouTube audio. Syncing to your YouTube watch history is not possible: YouTube does not allow apps to write it. ListenBrainz is the open alternative.',
+                  style: TextStyle(fontSize: 12, color: th.tx.withOpacity(.6)))),
+            ]);
+          }),
+    );
+  }
+}
+
+void openPortal(BuildContext c) => Navigator.push(c, PageRouteBuilder<void>(
+    opaque: true, transitionDuration: const Duration(milliseconds: 600),
+    pageBuilder: (_, __, ___) => const SonicPortalPage(),
+    transitionsBuilder: (_, a, __, child) => FadeTransition(opacity: a, child: child)));
+
+// ---------------- LIVE SONIC PORTAL ----------------
+// Real audio analysis: Android's Visualizer (native, see MainActivity.kt) sends the live FFT of what the
+// player is outputting. This engine turns it into bass / mids / treble / kick / snare signals.
+// The 3D worlds are drawn by a small perspective renderer written for Flutter (no web libraries).
+const _vizM = MethodChannel('cadence/viz');
+const _vizE = EventChannel('cadence/viz/stream');
+
+class SonicEngine {
+  StreamSubscription<dynamic>? _sub;
+  bool running = false;
+  double _tSub = 0, _tBass = 0, _tMid = 0, _tVocal = 0, _tTreble = 0, _tEnergy = 0;
+  final List<double> _tSpec = List<double>.filled(48, 0);
+  double sub = 0, bass = 0, mid = 0, vocal = 0, treble = 0, energy = 0, kick = 0, snare = 0;
+  final List<double> spec = List<double>.filled(48, 0);
+  double clock = 0, bassSens = 1, _lastData = -10;
+  final List<double> waves = [];
+  double _pBass = 0, _pSnare = 0, _fluxBass = .02, _fluxSnare = .02, _lastKick = -1, _lastSnare = -1;
+
+  Future<String> start() async {
+    if (!Platform.isAndroid) return 'Live audio analysis is only available on Android.';
+    await stop();
+    var st = await Permission.microphone.status;
+    if (!st.isGranted) { st = await Permission.microphone.request(); }
+    if (!st.isGranted) {
+      return 'Android requires the microphone permission to read the live audio signal. Cadence never records anything. Allow it in Settings, then tap Retry.';
+    }
+    try {
+      final session = player.androidAudioSessionId ?? 0;
+      final r = await _vizM.invokeMethod<String>('start', {'session': session});
+      if (r != 'ok') { return 'Audio analysis could not start (${r ?? 'no answer'}). Play a song and tap Retry.'; }
+      _sub = _vizE.receiveBroadcastStream().listen(_onData, onError: (_) {});
+      running = true;
+      return 'ok';
+    } catch (e) {
+      return 'Audio analysis is not available on this phone ($e).';
+    }
+  }
+
+  Future<void> stop() async {
+    await _sub?.cancel();
+    _sub = null;
+    if (running) { try { await _vizM.invokeMethod<String>('stop'); } catch (_) {} }
+    running = false;
+  }
+
+  void _onData(dynamic e) {
+    if (e is! Map) return;
+    final raw = e['fft'], srm = e['sr'];
+    if (raw is! Uint8List || srm is! int || raw.length < 8) return;
+    _lastData = clock;
+    final n = raw.length + 1;
+    final hz = (srm / 1000.0) / (2 * n);
+    double avg(double lo, double hi) {
+      var a = (lo / hz).ceil(), b = (hi / hz).floor();
+      if (a < 1) { a = 1; }
+      if (b > raw.length) { b = raw.length; }
+      if (b < a) { b = a; }
+      if (a > raw.length) { return 0; }
+      var s = 0.0;
+      for (var k = a; k <= b; k++) { s += raw[k - 1]; }
+      return (s / (b - a + 1)) / 255.0;
+    }
+    double sh(double x) => m.pow(m.min(1.0, m.max(0.0, x)), .6).toDouble();
+    final rawBass = avg(60, 260), rawSnare = avg(1800, 5200);
+    _tSub = m.min(1.0, sh(avg(20, 75)) * bassSens);
+    _tBass = m.min(1.0, sh(rawBass) * bassSens);
+    _tMid = sh(avg(260, 2000));
+    _tVocal = sh(avg(300, 3400));
+    _tTreble = sh(avg(2000, 16000));
+    _tEnergy = sh(avg(30, 12000));
+    for (int i = 0; i < 48; i++) {
+      final lo = 40 * m.pow(400, i / 48), hi = 40 * m.pow(400, (i + 1) / 48);
+      _tSpec[i] = sh(avg(lo.toDouble(), hi.toDouble()));
+    }
+    // transients: sudden rises (spectral flux) against a running average
+    final fb = m.max(0.0, rawBass - _pBass);
+    _pBass = rawBass;
+    _fluxBass = _fluxBass * .93 + fb * .07;
+    if (fb > _fluxBass * 2.1 + .035 / bassSens && clock - _lastKick > .17) {
+      kick = 1; _lastKick = clock; waves.add(clock);
+      if (waves.length > 6) { waves.removeAt(0); }
+    }
+    final fs = m.max(0.0, rawSnare - _pSnare);
+    _pSnare = rawSnare;
+    _fluxSnare = _fluxSnare * .93 + fs * .07;
+    if (fs > _fluxSnare * 2.3 + .03 && clock - _lastSnare > .12) { snare = 1; _lastSnare = clock; }
+  }
+
+  // Called every frame: eases the latest analysis so motion stays smooth between updates.
+  void tick(double dt) {
+    clock += dt;
+    if (clock - _lastData > .45) {
+      _tSub *= .9; _tBass *= .9; _tMid *= .9; _tVocal *= .9; _tTreble *= .9; _tEnergy *= .9;
+      for (int i = 0; i < 48; i++) { _tSpec[i] *= .9; }
+    }
+    double ease(double cur, double tar) => cur + (tar - cur) * (1 - m.exp(-dt * (tar > cur ? 22 : 6)));
+    sub = ease(sub, _tSub); bass = ease(bass, _tBass); mid = ease(mid, _tMid);
+    vocal = ease(vocal, _tVocal); treble = ease(treble, _tTreble); energy = ease(energy, _tEnergy);
+    for (int i = 0; i < 48; i++) { spec[i] = ease(spec[i], _tSpec[i]); }
+    kick *= m.exp(-dt * 5.5);
+    snare *= m.exp(-dt * 11);
+  }
+}
+
+class _Cam {
+  double yaw = .5, pitch = .18, dist = 7;
+  double _cy = 1, _sy = 0, _cp = 1, _sp = 0, _f = 500, _cx0 = 0, _cy0 = 0;
+  void prep(Size s) {
+    _cy = m.cos(yaw); _sy = m.sin(yaw); _cp = m.cos(pitch); _sp = m.sin(pitch);
+    _f = s.shortestSide * .95; _cx0 = s.width / 2; _cy0 = s.height / 2;
+  }
+  // o = [screenX, screenY, depth, scale]
+  bool p(double x, double y, double z, List<double> o) {
+    final x1 = x * _cy + z * _sy;
+    final z1 = -x * _sy + z * _cy;
+    final y1 = y * _cp - z1 * _sp;
+    final z2 = y * _sp + z1 * _cp + dist;
+    if (z2 < .25) return false;
+    final k = _f / z2;
+    o[0] = _cx0 + x1 * k; o[1] = _cy0 - y1 * k; o[2] = z2; o[3] = k;
+    return true;
+  }
+  // camera-space z of a direction (used for lighting)
+  double facing(double nx, double ny, double nz) {
+    final z1 = -nx * _sy + nz * _cy;
+    return -(ny * _sp + z1 * _cp);
+  }
+}
+
+Float32List _mkStars(int n) {
+  final r = m.Random(5);
+  final o = Float32List(n * 4);
+  for (int i = 0; i < n; i++) {
+    final u = r.nextDouble() * 2 - 1, th = r.nextDouble() * 6.2832, rad = 7 + r.nextDouble() * 11, s = m.sqrt(1 - u * u);
+    o[i * 4] = rad * s * m.cos(th); o[i * 4 + 1] = rad * u; o[i * 4 + 2] = rad * s * m.sin(th); o[i * 4 + 3] = r.nextDouble();
+  }
+  return o;
+}
+final Float32List _stars = _mkStars(1500);
+const worldNames = ['COSMOS', 'CYBER', 'LIQUID', 'DREAM'];
+const worldIcons = [Icons.public_rounded, Icons.grid_on_rounded, Icons.water_drop_rounded, Icons.cloud_rounded];
+
+class PortalPainter extends CustomPainter {
+  final int world, prevWorld; final double mix, intensity, density, q; final SonicEngine e; final _Cam cam;
+  PortalPainter(this.world, this.prevWorld, this.mix, this.e, this.cam, this.intensity, this.density, this.q, Listenable repaint) : super(repaint: repaint);
+  final List<double> _o = List<double>.filled(4, 0);
+  final List<double> _o2 = List<double>.filled(4, 0);
+  final List<double> _o3 = List<double>.filled(4, 0);
+  final List<double> _o4 = List<double>.filled(4, 0);
+
+  double _op(double v) => m.min(1.0, m.max(0.0, v * intensity));
+
+  @override
+  void paint(Canvas c, Size s) {
+    final rect = Offset.zero & s;
+    c.drawRect(rect, Paint()..color = Colors.black);
+    cam.prep(s);
+    if (mix < 1) {
+      c.saveLayer(rect, Paint()..color = Colors.white.withOpacity(1 - mix));
+      _draw(prevWorld, c, s);
+      c.restore();
+      c.saveLayer(rect, Paint()..color = Colors.white.withOpacity(mix));
+      _draw(world, c, s);
+      c.restore();
+    } else {
+      _draw(world, c, s);
+    }
+    // cinematic vignette
+    c.drawRect(rect, Paint()..shader = RadialGradient(radius: .95, colors: [Colors.transparent, Colors.black.withOpacity(.65)], stops: const [.55, 1]).createShader(rect));
+    // snare flash
+    if (e.snare > .05) { c.drawRect(rect, Paint()..color = Colors.white.withOpacity(.07 * e.snare * intensity)); }
+  }
+
+  void _draw(int w, Canvas c, Size s) {
+    if (w == 0) { _cosmos(c, s); } else if (w == 1) { _cyber(c, s); } else if (w == 2) { _liquid(c, s); } else { _dream(c, s); }
+  }
+
+  Paint _glow(Color col, double op, double w) => Paint()
+    ..style = PaintingStyle.stroke..strokeWidth = w..strokeCap = StrokeCap.round..strokeJoin = StrokeJoin.round
+    ..color = col.withOpacity(m.min(1.0, m.max(0.0, op)))..blendMode = BlendMode.plus;
+
+  void _poly(Canvas c, List<List<double>> pts, Paint p, {bool close = false}) {
+    if (pts.length < 2) return;
+    final path = Path()..moveTo(pts[0][0], pts[0][1]);
+    for (int i = 1; i < pts.length; i++) { path.lineTo(pts[i][0], pts[i][1]); }
+    if (close) { path.close(); }
+    c.drawPath(path, p);
+  }
+
+  // ---------------- COSMOS ----------------
+  void _cosmos(Canvas c, Size s) {
+    final t = e.clock, rect = Offset.zero & s;
+    final en = e.energy;
+    c.drawRect(rect, Paint()..shader = RadialGradient(center: Alignment(-.5 + .25 * m.sin(t * .1 + cam.yaw), -.35), radius: .95,
+        colors: [const Color(0xFF6A2CFF).withOpacity(_op(.2 + en * .35)), Colors.transparent]).createShader(rect));
+    c.drawRect(rect, Paint()..shader = RadialGradient(center: Alignment(.6, .45 + .15 * m.cos(t * .13)), radius: .85,
+        colors: [const Color(0xFF00C8FF).withOpacity(_op(.12 + e.mid * .3)), Colors.transparent]).createShader(rect));
+    // stars (treble makes them flare and burst)
+    final n = m.min(1500, (800 * density * q).round());
+    final big = Float32List(n * 2), mid = Float32List(n * 2), small = Float32List(n * 2);
+    var nb = 0, nm = 0, ns = 0;
+    final rot = t * .018, cr = m.cos(rot), sr = m.sin(rot), bucket = (t * 9).floor();
+    for (int i = 0; i < n; i++) {
+      final x = _stars[i * 4], y = _stars[i * 4 + 1], z = _stars[i * 4 + 2], ph = _stars[i * 4 + 3];
+      if (!cam.p(x * cr + z * sr, y, -x * sr + z * cr, _o)) continue;
+      if (_o[0] < -10 || _o[0] > s.width + 10 || _o[1] < -10 || _o[1] > s.height + 10) continue;
+      final flare = e.treble > .22 && _h(i, bucket) > 1 - e.treble * .22;
+      if (flare) { big[nb++] = _o[0]; big[nb++] = _o[1]; }
+      else if (ph > .75) { mid[nm++] = _o[0]; mid[nm++] = _o[1]; }
+      else { small[ns++] = _o[0]; small[ns++] = _o[1]; }
+    }
+    c.drawRawPoints(PointMode.points, small.sublist(0, ns), Paint()..color = Colors.white.withOpacity(_op(.55))..strokeWidth = 1.4..strokeCap = StrokeCap.round);
+    c.drawRawPoints(PointMode.points, mid.sublist(0, nm), Paint()..color = const Color(0xFFBFD9FF).withOpacity(_op(.8))..strokeWidth = 2.4..strokeCap = StrokeCap.round);
+    c.drawRawPoints(PointMode.points, big.sublist(0, nb), Paint()..color = Colors.white.withOpacity(_op(.95))..strokeWidth = 4.2..strokeCap = StrokeCap.round..blendMode = BlendMode.plus);
+    // radial bursts of particles (treble)
+    if (e.treble > .12) {
+      final cnt = m.min(120, (90 * density * q).round());
+      final pts = Float32List(cnt * 2);
+      var k = 0;
+      for (int i = 0; i < cnt; i++) {
+        final u = _h(i, 3) * 2 - 1, th = _h(i, 4) * 6.2832, sq = m.sqrt(1 - u * u), age = (t * (.35 + _h(i, 5) * .5) + _h(i, 6)) % 1;
+        final r = 1.4 + age * (3 + 5 * e.treble);
+        if (!cam.p(r * sq * m.cos(th), r * u, r * sq * m.sin(th), _o)) continue;
+        pts[k++] = _o[0]; pts[k++] = _o[1];
+      }
+      c.drawRawPoints(PointMode.points, pts.sublist(0, k), Paint()..color = const Color(0xFF8CF3FF).withOpacity(_op(.35 + e.treble * .6))..strokeWidth = 2.6..strokeCap = StrokeCap.round..blendMode = BlendMode.plus);
+    }
+    // central energy structure: glow + three interlocking rings
+    if (cam.p(0, 0, 0, _o)) {
+      final rad = (70 + 150 * e.sub + 90 * e.kick) * _o[3] / 120;
+      final gc = Rect.fromCircle(center: Offset(_o[0], _o[1]), radius: rad * 2.2);
+      c.drawCircle(gc.center, gc.width / 2, Paint()..blendMode = BlendMode.plus..shader = RadialGradient(colors: [
+        Color.lerp(const Color(0xFF9A5CFF), const Color(0xFF00E5FF), e.mid)!.withOpacity(_op(.55 + e.kick * .35)), Colors.transparent]).createShader(gc));
+    }
+    final rr = 1.15 + .55 * e.bass + .35 * e.kick;
+    for (int ring = 0; ring < 3; ring++) {
+      final pts = <List<double>>[];
+      final tx = t * (.25 + ring * .13) + ring * 1.1, ty = t * (.19 + ring * .07) + ring * 2.0, segs = m.max(24, (72 * q).round());
+      for (int i = 0; i <= segs; i++) {
+        final a = i / segs * 6.2832, wob = 1 + .12 * e.spec[(i * 47 ~/ segs) % 48] * 2;
+        var x = rr * wob * m.cos(a), y = 0.0, z = rr * wob * m.sin(a);
+        final y1 = y * m.cos(tx) - z * m.sin(tx), z1 = y * m.sin(tx) + z * m.cos(tx);
+        final x2 = x * m.cos(ty) + z1 * m.sin(ty), z2 = -x * m.sin(ty) + z1 * m.cos(ty);
+        if (!cam.p(x2, y1, z2, _o)) continue;
+        pts.add([_o[0], _o[1]]);
+      }
+      final col = ring == 0 ? const Color(0xFFB07CFF) : ring == 1 ? const Color(0xFF4DD8FF) : const Color(0xFFFFFFFF);
+      _poly(c, pts, _glow(col, _op(.35 + e.energy * .5), 5 + 7 * e.bass));
+      _poly(c, pts, _glow(Colors.white, _op(.5 + e.kick * .4), 1.3));
+    }
+    // kick shockwaves: expanding cosmic waves
+    for (final w in e.waves) {
+      final age = e.clock - w;
+      if (age < 0 || age > 2.4) continue;
+      final r = .8 + age * 5.2, fade = 1 - age / 2.4, pts = <List<double>>[];
+      for (int i = 0; i <= 80; i++) {
+        final a = i / 80 * 6.2832;
+        if (!cam.p(r * m.cos(a), 0, r * m.sin(a), _o)) continue;
+        pts.add([_o[0], _o[1]]);
+      }
+      _poly(c, pts, _glow(Color.lerp(const Color(0xFF00E5FF), const Color(0xFFB07CFF), age / 2.4)!, _op(.8 * fade), 3.5 * fade + .8));
+    }
+  }
+
+  // ---------------- CYBER ----------------
+  void _cyber(Canvas c, Size s) {
+    final t = e.clock, rect = Offset.zero & s;
+    c.drawRect(rect, Paint()..shader = LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter,
+        colors: [const Color(0xFF05000F), const Color(0xFF14002B).withOpacity(.9), const Color(0xFF2B0045).withOpacity(_op(.5 + e.energy * .3))]).createShader(rect));
+    // beat pulse at the vanishing point
+    if (cam.p(0, 0, 30, _o)) {
+      final gc = Rect.fromCircle(center: Offset(_o[0], _o[1]), radius: s.shortestSide * (.55 + .5 * e.kick));
+      c.drawCircle(gc.center, gc.width / 2, Paint()..blendMode = BlendMode.plus..shader = RadialGradient(colors: [
+        const Color(0xFFFF2BD6).withOpacity(_op(.18 + .55 * e.kick)), Colors.transparent]).createShader(gc));
+    }
+    // reactive floor grid (height follows the spectrum)
+    final rows = m.max(6, (14 * q).round());
+    for (int j = 0; j < rows; j++) {
+      final z = ((j * 2.2 - t * (2 + 5 * e.energy)) % (rows * 2.2));
+      final pts = <List<double>>[];
+      for (int i = 0; i <= 32; i++) {
+        final x = -12 + i * .75, y = -2.0 + e.spec[(i * 47 ~/ 32) % 48] * 2.2 * intensity * (1 - z / (rows * 2.2) * .5);
+        if (!cam.p(x, y, z, _o)) continue;
+        pts.add([_o[0], _o[1]]);
+      }
+      _poly(c, pts, _glow(const Color(0xFFFF2BD6), _op(.55 * (1 - z / (rows * 2.2)) + .1), 1.3 + 1.5 * e.kick));
+    }
+    for (int i = 0; i <= 16; i++) {
+      final x = -12 + i * 1.5, pts = <List<double>>[];
+      for (int k = 0; k <= 10; k++) {
+        final z = k * 2.4, y = -2.0 + e.spec[m.max(0, m.min(47, ((x + 12) / 24 * 47).round()))] * 2.2 * intensity * (1 - k / 14);
+        if (!cam.p(x, y, z, _o)) continue;
+        pts.add([_o[0], _o[1]]);
+      }
+      _poly(c, pts, _glow(const Color(0xFF00E5FF), _op(.35), 1.1));
+    }
+    // glowing neon tunnel
+    const len = 34.0;
+    final frames = m.max(8, (18 * q).round());
+    for (int i = 0; i < frames; i++) {
+      final zz = ((i * (len / frames) - t * (4 + 9 * e.energy)) % len + len) % len;
+      final half = 2.5 + .25 * m.sin(i + t) + .4 * e.bass, tw = t * .12 + zz * .035;
+      final pts = <List<double>>[];
+      for (int k = 0; k < 4; k++) {
+        final a = tw + k * 1.5708 + .7854, x = half * 1.41 * m.cos(a), y = half * 1.41 * m.sin(a);
+        if (!cam.p(x, y, zz, _o)) continue;
+        pts.add([_o[0], _o[1]]);
+      }
+      final near = 1 - zz / len;
+      final col = i.isEven ? const Color(0xFF00E5FF) : const Color(0xFFFF2BD6);
+      _poly(c, pts, _glow(col, _op(.25 + .75 * e.kick * near + .35 * near), 1.2 + 3.2 * e.kick), close: true);
+    }
+    // geometric core: rotating octahedron
+    final r = 1.0 + .7 * e.bass + .4 * e.kick, a = t * .5, ca = m.cos(a), sa = m.sin(a);
+    final v = <List<double>>[];
+    for (final p in [[r, 0.0, 0.0], [-r, 0.0, 0.0], [0.0, r, 0.0], [0.0, -r, 0.0], [0.0, 0.0, r], [0.0, 0.0, -r]]) {
+      if (!cam.p(p[0] * ca + p[2] * sa, p[1], -p[0] * sa + p[2] * ca, _o)) { v.add([-9999, -9999]); } else { v.add([_o[0], _o[1]]); }
+    }
+    for (final ed in [[0, 2], [0, 3], [0, 4], [0, 5], [1, 2], [1, 3], [1, 4], [1, 5], [2, 4], [2, 5], [3, 4], [3, 5]]) {
+      if (v[ed[0]][0] < -9000 || v[ed[1]][0] < -9000) continue;
+      c.drawLine(Offset(v[ed[0]][0], v[ed[0]][1]), Offset(v[ed[1]][0], v[ed[1]][1]), _glow(const Color(0xFFB8F6FF), _op(.7 + e.kick * .3), 2 + 2 * e.kick));
+    }
+  }
+
+  // ---------------- LIQUID ----------------
+  void _liquid(Canvas c, Size s) {
+    final t = e.clock, rect = Offset.zero & s;
+    c.drawRect(rect, Paint()..shader = RadialGradient(center: const Alignment(0, .2), radius: 1.0,
+        colors: [const Color(0xFF1A1040).withOpacity(_op(.8 + e.energy * .2)), const Color(0xFF020208)]).createShader(rect));
+    final la = m.max(8, (18 * q).round()), lo = m.max(14, (30 * q).round());
+    final vx = List<double>.filled((la + 1) * (lo + 1) * 6, 0);
+    final ok = List<bool>.filled((la + 1) * (lo + 1), false);
+    for (int i = 0; i <= la; i++) {
+      final phi = 3.14159 * i / la, sp = m.sin(phi), cp = m.cos(phi);
+      for (int j = 0; j <= lo; j++) {
+        final th = 6.2832 * j / lo, nx = sp * m.cos(th), nz = sp * m.sin(th), ny = cp;
+        final band = e.spec[m.max(0, m.min(47, (j % lo) * 47 ~/ lo))];
+        final d = .26 * e.sub + .2 * e.bass + band * .42 * intensity + .07 * m.sin(phi * 5 + t * 1.6) * (1 + e.mid)
+            + .05 * m.sin(th * 3 - t * 1.1) + e.kick * .22 * m.sin(phi * 9 - t * 11) * m.exp(-phi * .5);
+        final rad = 1.6 + d, idx = i * (lo + 1) + j, b = idx * 6;
+        if (!cam.p(nx * rad, ny * rad, nz * rad, _o)) continue;
+        ok[idx] = true;
+        vx[b] = _o[0]; vx[b + 1] = _o[1]; vx[b + 2] = _o[2]; vx[b + 3] = nx; vx[b + 4] = ny; vx[b + 5] = nz;
+      }
+    }
+    final quads = <int>[];
+    for (int i = 0; i < la; i++) { for (int j = 0; j < lo; j++) { quads.add(i * lo + j); } }
+    double depthOf(int qd) { final i = qd ~/ lo, j = qd % lo; return vx[(i * (lo + 1) + j) * 6 + 2]; }
+    quads.sort((a, b) => depthOf(b).compareTo(depthOf(a)));
+    const lx = -.4, ly = .75, lz = -.55;
+    for (final qd in quads) {
+      final i = qd ~/ lo, j = qd % lo;
+      final i0 = i * (lo + 1) + j, i1 = i0 + 1, i2 = i0 + lo + 2, i3 = i0 + lo + 1;
+      if (!(ok[i0] && ok[i1] && ok[i2] && ok[i3])) continue;
+      final nx = (vx[i0 * 6 + 3] + vx[i2 * 6 + 3]) / 2, ny = (vx[i0 * 6 + 4] + vx[i2 * 6 + 4]) / 2, nz = (vx[i0 * 6 + 5] + vx[i2 * 6 + 5]) / 2;
+      final f = m.max(0.0, cam.facing(nx, ny, nz));
+      if (f <= 0 && vx[i0 * 6 + 2] > cam.dist + 1.1) continue;
+      final env = m.min(1.0, m.max(0.0, (ny + .35) / 1.35)), rim = m.pow(1 - m.min(1.0, f), 2.2).toDouble();
+      final df = m.max(0.0, nx * lx + ny * ly + nz * lz), spec = m.pow(df, 22).toDouble();
+      var r = 14 + 190 * env + 70 * rim * (1 - e.mid) + 120 * spec;
+      var g = 18 + 205 * env + 40 * rim + 120 * spec;
+      var b = 40 + 240 * env + 160 * rim * (.5 + e.mid) + 120 * spec;
+      r += 70 * e.bass * (1 - env); b += 40 * e.treble;
+      final col = Color.fromARGB(255, m.max(0, m.min(255, r.round())), m.max(0, m.min(255, g.round())), m.max(0, m.min(255, b.round())));
+      final path = Path()..moveTo(vx[i0 * 6], vx[i0 * 6 + 1])..lineTo(vx[i1 * 6], vx[i1 * 6 + 1])..lineTo(vx[i2 * 6], vx[i2 * 6 + 1])..lineTo(vx[i3 * 6], vx[i3 * 6 + 1])..close();
+      c.drawPath(path, Paint()..color = col..style = PaintingStyle.fill);
+      c.drawPath(path, Paint()..color = col..style = PaintingStyle.stroke..strokeWidth = .7);
+    }
+    // chrome droplets / treble sparkle
+    final cnt = m.min(80, (60 * density * q).round());
+    final pts = Float32List(cnt * 2);
+    var k = 0;
+    for (int i = 0; i < cnt; i++) {
+      final a = t * (.2 + _h(i, 1) * .4) + _h(i, 2) * 6.28, rr = 2.4 + _h(i, 3) * 1.6 + e.bass * .5;
+      if (!cam.p(rr * m.cos(a), (_h(i, 4) - .5) * 3, rr * m.sin(a), _o)) continue;
+      pts[k++] = _o[0]; pts[k++] = _o[1];
+    }
+    c.drawRawPoints(PointMode.points, pts.sublist(0, k), Paint()..color = Color.lerp(const Color(0xFFBFD6FF), const Color(0xFFFFFFFF), e.treble)!.withOpacity(_op(.5 + e.treble * .5))..strokeWidth = 3..strokeCap = StrokeCap.round..blendMode = BlendMode.plus);
+  }
+
+  // ---------------- DREAM ----------------
+  void _dream(Canvas c, Size s) {
+    final t = e.clock, rect = Offset.zero & s, w = s.width, h = s.height;
+    final hue = (252 + 38 * m.sin(t * .03) + 30 * e.energy + cam.yaw * 6) % 360;
+    Color hc(double dh, double sat, double l) => HSLColor.fromAHSL(1, (hue + dh) % 360, sat, l).toColor();
+    c.drawRect(rect, Paint()..shader = LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter,
+        colors: [hc(0, .55, .06), hc(25, .5, .18 + e.energy * .08), hc(70, .65, .42 + e.bass * .1), hc(100, .6, .55)], stops: const [0, .45, .75, 1]).createShader(rect));
+    // soft sun / moon on the horizon
+    final hy = h * (.66 + cam.pitch * .15);
+    final sunR = w * (.3 + .12 * e.bass);
+    final sc = Rect.fromCircle(center: Offset(w * (.5 + .18 * m.sin(t * .05 - cam.yaw)), hy), radius: sunR);
+    c.drawCircle(sc.center, sunR, Paint()..blendMode = BlendMode.plus..shader = RadialGradient(colors: [hc(110, .8, .8).withOpacity(_op(.55 + e.kick * .25)), Colors.transparent]).createShader(sc));
+    // volumetric light shafts
+    for (int i = 0; i < 6; i++) {
+      final x0 = w * (.1 + .16 * i) + 30 * m.sin(t * .15 + i) - cam.yaw * 40, spread = 60 + 40 * m.sin(t * .1 + i * 2);
+      final path = Path()..moveTo(x0, -10)..lineTo(x0 - spread * 2.2, hy)..lineTo(x0 + spread * 2.2, hy)..close();
+      c.drawPath(path, Paint()..blendMode = BlendMode.plus..shader = LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter,
+          colors: [Colors.white.withOpacity(_op(.07 + e.energy * .12)), Colors.transparent]).createShader(Rect.fromLTWH(x0 - spread * 2.2, 0, spread * 4.4, hy)));
+    }
+    // layered landscape with parallax
+    for (int l = 0; l < 3; l++) {
+      final base = h * (.62 + .09 * l) + cam.pitch * 30 * (l + 1), amp = 26 + 20 * l + 30 * e.bass * (l + 1) / 3;
+      final path = Path()..moveTo(0, h);
+      final stepX = w / 42;
+      for (int i = 0; i <= 42; i++) {
+        final x = i * stepX;
+        final y = base + m.sin(x * .007 * (l + 1) + t * .04 * (l + 1) + cam.yaw * (2 + l)) * amp + m.sin(x * .021 + l * 3 + t * .02) * amp * .4;
+        path.lineTo(x, y);
+      }
+      path..lineTo(w, h)..close();
+      c.drawPath(path, Paint()..color = hc(60 - l * 30, .5, .16 - l * .04).withOpacity(.92));
+    }
+    // drifting volumetric fog
+    for (int i = 0; i < 7; i++) {
+      final cx = (((i * .37 + t * .008 * (i + 1) - cam.yaw * .1) % 1.4) - .2) * w, cy = h * (.58 + .06 * (i % 4));
+      final fr = Rect.fromCircle(center: Offset(cx, cy), radius: w * (.38 + .05 * (i % 3)));
+      c.drawCircle(fr.center, fr.width / 2, Paint()..blendMode = BlendMode.plus..shader = RadialGradient(colors: [
+        hc(80, .5, .8).withOpacity(_op(.07 + e.mid * .12)), Colors.transparent]).createShader(fr));
+    }
+    // soft glowing particles
+    final cnt = m.min(160, (100 * density * q).round());
+    for (int i = 0; i < cnt; i++) {
+      final x = (((_h(i, 1) + .03 * m.sin(t * .25 + i) + cam.yaw * .05) % 1) + 1) % 1 * w;
+      final y = (((_h(i, 2) - t * .018 * (.4 + _h(i, 3))) % 1) + 1) % 1 * h;
+      final r = 1.5 + 3 * _h(i, 4) + 5 * e.treble * _h(i, 5), tw = .5 + .5 * m.sin(t * (.8 + _h(i, 6)) + i);
+      final col = (i % 3 == 0 ? Colors.white : i % 3 == 1 ? hc(120, .8, .8) : hc(40, .8, .8));
+      c.drawCircle(Offset(x, y), r * 3, Paint()..color = col.withOpacity(_op(.06 * tw))..blendMode = BlendMode.plus);
+      c.drawCircle(Offset(x, y), r, Paint()..color = col.withOpacity(_op(.35 + .5 * tw))..blendMode = BlendMode.plus);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant PortalPainter o) => true;
+}
+
+class SonicPortalPage extends StatefulWidget { const SonicPortalPage({super.key}); @override State<SonicPortalPage> createState() => _SPS(); }
+class _SPS extends State<SonicPortalPage> with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+  final eng = SonicEngine();
+  final cam = _Cam();
+  final frame = ValueNotifier<int>(0);
+  late final Ticker tk;
+  Duration _last = Duration.zero;
+  int world = 0, prevWorld = 0;
+  double mixT = 1, intensity = 1, bassSens = 1, density = 1, q = 1;
+  bool autoSwitch = false, uiOn = true, hideUi = false, immersive = true, _drag = false;
+  double _autoT = 0, _acc = 0, _z0 = 7;
+  int _n = 0;
+  Timer? _hide;
+  String status = '';
+  double? _seek;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    _loadPrefs();
+    tk = createTicker(_tick)..start();
+    _startEngine();
+    _poke();
+  }
+
+  Future<void> _loadPrefs() async {
+    final sp = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      world = m.max(0, m.min(3, sp.getInt('sp_world') ?? 0));
+      prevWorld = world;
+      intensity = sp.getDouble('sp_int') ?? 1;
+      bassSens = sp.getDouble('sp_bass') ?? 1;
+      density = sp.getDouble('sp_dens') ?? 1;
+      autoSwitch = sp.getBool('sp_auto') ?? false;
+    });
+  }
+
+  Future<void> _savePrefs() async {
+    final sp = await SharedPreferences.getInstance();
+    await sp.setInt('sp_world', world);
+    await sp.setDouble('sp_int', intensity);
+    await sp.setDouble('sp_bass', bassSens);
+    await sp.setDouble('sp_dens', density);
+    await sp.setBool('sp_auto', autoSwitch);
+  }
+
+  Future<void> _startEngine() async {
+    final r = await eng.start();
+    if (mounted) { setState(() => status = r == 'ok' ? '' : r); }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState st) {
+    if (st == AppLifecycleState.paused) { eng.stop(); }
+    if (st == AppLifecycleState.resumed) { _startEngine(); }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _hide?.cancel();
+    tk.dispose();
+    eng.stop();
+    frame.dispose();
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    _savePrefs();
+    super.dispose();
+  }
+
+  void _tick(Duration d) {
+    final dt = m.min(.05, (d - _last).inMicroseconds / 1e6);
+    _last = d;
+    if (dt <= 0) return;
+    eng.bassSens = bassSens;
+    eng.tick(dt);
+    if (!_drag) { cam.yaw += dt * (.05 + .1 * eng.energy); }
+    if (mixT < 1) { mixT = m.min(1.0, mixT + dt / .9); }
+    if (autoSwitch) {
+      _autoT += dt;
+      if (_autoT > 40) { _autoT = 0; _setWorld((world + 1) % 4); }
+    }
+    _acc += dt; _n++;
+    if (_n >= 45) {
+      final avg = _acc / _n;
+      if (avg > .024 && q > .45) { q -= .1; } else if (avg < .0175 && q < 1) { q += .05; }
+      _acc = 0; _n = 0;
+    }
+    frame.value++;
+  }
+
+  void _setWorld(int w) {
+    if (w == world) return;
+    setState(() { prevWorld = world; world = w; mixT = 0; });
+    _savePrefs();
+  }
+
+  void _poke() {
+    _hide?.cancel();
+    if (!uiOn && mounted) { setState(() => uiOn = true); }
+    _hide = Timer(const Duration(seconds: 4), () { if (mounted) { setState(() => uiOn = false); } });
+  }
+
+  void _reset() { cam.yaw = .5; cam.pitch = .18; cam.dist = 7; _poke(); }
+
+  void _settings(BuildContext c) {
+    _poke();
+    _sheet(c, StatefulBuilder(builder: (ctx, setS) {
+      Widget row(String label, double v, double lo, double hi, void Function(double) f) => Row(children: [
+            SizedBox(width: 118, child: Text(label, style: const TextStyle(fontSize: 13))),
+            Expanded(child: Slider(value: v, min: lo, max: hi, onChanged: (x) { setS(() {}); setState(() => f(x)); }, onChangeEnd: (_) => _savePrefs())),
+          ]);
+      return Column(mainAxisSize: MainAxisSize.min, children: [
+        const Text('Portal settings', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+        row('Visual intensity', intensity, .3, 1.5, (x) => intensity = x),
+        row('Bass sensitivity', bassSens, .5, 2.0, (x) => bassSens = x),
+        row('Particle density', density, .3, 1.5, (x) => density = x),
+        SwitchListTile(title: const Text('Switch worlds automatically'), subtitle: const Text('Every 40 seconds'), value: autoSwitch,
+            onChanged: (v) { setS(() {}); setState(() => autoSwitch = v); _savePrefs(); }),
+      ]);
+    }));
+  }
+
+  Widget _glass(Widget child, {double radius = 28}) => ClipRRect(borderRadius: BorderRadius.circular(radius), child: BackdropFilter(
+      filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+      child: Container(decoration: BoxDecoration(color: Colors.white.withOpacity(.07), borderRadius: BorderRadius.circular(radius),
+          border: Border.all(color: Colors.white.withOpacity(.14))), child: child)));
+
+  Widget _top(BuildContext c) => Padding(padding: const EdgeInsets.fromLTRB(8, 4, 8, 0), child: Row(children: [
+        IconButton(tooltip: 'Exit', icon: const Icon(Icons.close_rounded, color: Colors.white), onPressed: () => Navigator.pop(c)),
+        Expanded(child: SingleChildScrollView(scrollDirection: Axis.horizontal, child: Row(children: [
+          for (int i = 0; i < 4; i++) Padding(padding: const EdgeInsets.only(right: 6), child: GestureDetector(
+              onTap: () { _setWorld(i); _poke(); },
+              child: AnimatedContainer(duration: const Duration(milliseconds: 300), padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(borderRadius: BorderRadius.circular(20),
+                      color: world == i ? Colors.white.withOpacity(.2) : Colors.white.withOpacity(.05),
+                      border: Border.all(color: Colors.white.withOpacity(world == i ? .5 : .12))),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(worldIcons[i], size: 15, color: Colors.white.withOpacity(world == i ? 1 : .6)), const SizedBox(width: 6),
+                    Text(worldNames[i], style: TextStyle(color: Colors.white.withOpacity(world == i ? 1 : .6), fontSize: 11, letterSpacing: 2, fontWeight: FontWeight.w500)),
+                  ])))),
+        ]))),
+        IconButton(tooltip: 'Settings', icon: const Icon(Icons.tune_rounded, color: Colors.white), onPressed: () => _settings(c)),
+        IconButton(tooltip: 'Full screen', icon: Icon(immersive ? Icons.fullscreen_exit_rounded : Icons.fullscreen_rounded, color: Colors.white), onPressed: () {
+          setState(() => immersive = !immersive);
+          SystemChrome.setEnabledSystemUIMode(immersive ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge);
+          _poke();
+        }),
+        IconButton(tooltip: 'Hide interface', icon: const Icon(Icons.visibility_off_rounded, color: Colors.white), onPressed: () => setState(() => hideUi = true)),
+      ]));
+
+  Widget _bottom(BuildContext c) => StreamBuilder<SequenceState?>(stream: player.sequenceStateStream, builder: (_, s) {
+        final t = curTrack(s.data);
+        return Padding(padding: const EdgeInsets.fromLTRB(14, 0, 14, 14), child: _glass(Padding(padding: const EdgeInsets.fromLTRB(14, 12, 14, 8), child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Row(children: [
+            Art(t, 54, 14), const SizedBox(width: 12),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(t?.title ?? 'Nothing playing', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w500)),
+              Text(t?.artist ?? '', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: Colors.white.withOpacity(.65), fontSize: 13, letterSpacing: .5)),
+            ])),
+            IconButton(icon: const Icon(Icons.skip_previous_rounded, color: Colors.white), onPressed: () { player.seekToPrevious(); _poke(); }),
+            const PlayBtn(48),
+            IconButton(icon: const Icon(Icons.skip_next_rounded, color: Colors.white), onPressed: () { skipNext(); _poke(); }),
+          ]),
+          StreamBuilder<Duration?>(stream: player.durationStream, builder: (_, ds) => StreamBuilder<Duration>(stream: player.positionStream, builder: (_, ps) {
+            final dur = (ds.data ?? Duration.zero).inMilliseconds.toDouble(), pos = (ps.data ?? Duration.zero).inMilliseconds.toDouble();
+            final v = _seek ?? (dur <= 0 ? 0.0 : m.min(1.0, pos / dur));
+            return SliderTheme(data: SliderTheme.of(c).copyWith(trackHeight: 2, thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5), activeTrackColor: Colors.white, inactiveTrackColor: Colors.white24, thumbColor: Colors.white),
+                child: Slider(value: v, onChanged: dur <= 0 ? null : (x) => setState(() => _seek = x),
+                    onChangeEnd: (x) { player.seek(Duration(milliseconds: (x * dur).round())); setState(() => _seek = null); _poke(); }));
+          })),
+          Row(children: [
+            const Icon(Icons.volume_up_rounded, size: 18, color: Colors.white70),
+            Expanded(child: StreamBuilder<double>(stream: player.volumeStream, builder: (_, vs) => SliderTheme(
+                data: SliderTheme.of(c).copyWith(trackHeight: 2, thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 4), activeTrackColor: Colors.white70, inactiveTrackColor: Colors.white24, thumbColor: Colors.white),
+                child: Slider(value: m.max(0.0, m.min(1.0, vs.data ?? 1.0)), onChanged: (x) { player.setVolume(x); _poke(); })))),
+          ]),
+        ]))));
+      });
+
+  @override
+  Widget build(BuildContext c) {
+    final show = uiOn && !hideUi;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(children: [
+        Positioned.fill(child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () { if (hideUi) { setState(() => hideUi = false); _poke(); } else { setState(() => uiOn = !uiOn); if (uiOn) { _poke(); } } },
+            onDoubleTap: _reset,
+            onScaleStart: (_) { _drag = true; _z0 = cam.dist; },
+            onScaleUpdate: (d) {
+              cam.yaw += d.focalPointDelta.dx * .008;
+              cam.pitch = m.max(-1.2, m.min(1.2, cam.pitch - d.focalPointDelta.dy * .006));
+              if (d.scale != 1) { cam.dist = m.max(3.5, m.min(14.0, _z0 / d.scale)); }
+            },
+            onScaleEnd: (_) => _drag = false,
+            child: RepaintBoundary(child: CustomPaint(size: Size.infinite, painter: PortalPainter(world, prevWorld, mixT, eng, cam, intensity, density, q, frame))))),
+        if (status.isNotEmpty) Center(child: Padding(padding: const EdgeInsets.all(28), child: _glass(Padding(padding: const EdgeInsets.all(20), child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Icon(Icons.graphic_eq_rounded, color: Colors.white, size: 36), const SizedBox(height: 10),
+          Text(status, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 14)), const SizedBox(height: 14),
+          Wrap(spacing: 10, children: [
+            FilledButton(onPressed: _startEngine, child: const Text('Retry')),
+            TextButton(onPressed: () => openAppSettings(), child: const Text('Open settings')),
+          ]),
+        ]))))),
+        SafeArea(child: Column(children: [
+          AnimatedOpacity(opacity: show ? 1 : 0, duration: const Duration(milliseconds: 400), child: IgnorePointer(ignoring: !show, child: _top(c))),
+          const Spacer(),
+          AnimatedOpacity(opacity: show ? 1 : 0, duration: const Duration(milliseconds: 400), child: IgnorePointer(ignoring: !show, child: _bottom(c))),
+        ])),
+      ]),
+    );
+  }
+}
+
