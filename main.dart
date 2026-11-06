@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:typed_data';
-import 'dart:convert' show jsonDecode, jsonEncode, utf8;
+import 'dart:convert' show base64Url, jsonDecode, jsonEncode, utf8;
 import 'dart:io';
 import 'dart:math' as m;
 import 'dart:ui';
@@ -945,6 +945,7 @@ Future<void> main() async {
   fx.value = sp.getInt('fx') ?? 0;
   jamendoKey.value = sp.getString('jamendoKey') ?? '';
   await ytLoadPrefs(sp);
+  await dnaLoadPresets(sp);
   await hub.loadPrefs();
   final savedRepos = sp.getStringList('repos') ?? [if (sp.getString('repo') != null) sp.getString('repo')!];
   if (savedRepos.isNotEmpty) {
@@ -1045,7 +1046,7 @@ void _diagOnce() {
     try {
       final n = await Permission.notification.status;
       final b = await Permission.ignoreBatteryOptimizations.isGranted;
-      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 27');
+      snack('Check: notifications ${n.isGranted ? "ON" : "OFF"} - battery ${b ? "OK" : "restricted"} - build 29');
     } catch (_) {}
   });
 }
@@ -1440,7 +1441,7 @@ class _SplashS extends State<Splash> with SingleTickerProviderStateMixin {
           const SizedBox(height: 8),
           Text('DEEP, BLUE AND MIST', style: TextStyle(fontSize: 12, letterSpacing: 5, color: th.tx.withOpacity(.6))),
           const SizedBox(height: 10),
-          Text('build 27', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
+          Text('build 29', style: TextStyle(fontSize: 11, color: th.tx.withOpacity(.4))),
           const SizedBox(height: 26),
           SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: th.ac)),
         ])))));
@@ -1890,6 +1891,7 @@ class NowPlaying extends StatelessWidget {
                 if (t != null) ListenableBuilder(listenable: lib, builder: (_, __) =>
                     _Glass(lib.favs.contains(t.path) ? Icons.favorite : Icons.favorite_border, () { HapticFeedback.selectionClick(); lib.toggleFav(t); })),
                 if (t != null) _Glass(Icons.blur_on_rounded, () => openPortal(c)),
+                if (t != null) _Glass(Icons.science_rounded, () => openDna(c)),
                 if (t != null) _Glass(Icons.lyrics_rounded, () => Navigator.push(c, slideUp(const LyricsPage()))),
                 if (t != null) _Glass(Icons.graphic_eq_rounded, () => infoSheet(c, t)),
               ]),
@@ -1929,6 +1931,8 @@ void _sheet(BuildContext c, Widget w) => showModalBottomSheet(context: c, showDr
     backgroundColor: th.bg, builder: (_) => Padding(padding: const EdgeInsets.fromLTRB(22, 0, 22, 28), child: w));
 
 void moreSheet(BuildContext c, Track t) => _sheet(c, Column(mainAxisSize: MainAxisSize.min, children: [
+      ListTile(leading: const Icon(Icons.celebration_rounded), title: const Text('Music Party'), subtitle: const Text('Play in sync with friends'), onTap: () { Navigator.pop(c); Navigator.push(c, MaterialPageRoute(builder: (_) => const PartyPage())); }),
+      ListTile(leading: const Icon(Icons.science_rounded), title: const Text('Sound DNA Lab'), subtitle: const Text('Sculpt the sound in 3D'), onTap: () { Navigator.pop(c); openDna(c); }),
       ListTile(leading: const Icon(Icons.blur_on_rounded), title: const Text('Live Sonic Portal'), subtitle: const Text('Music in 3D, reacting to the real audio'), onTap: () { Navigator.pop(c); openPortal(c); }),
       ListTile(leading: const Icon(Icons.lyrics_rounded), title: const Text('Lyrics'), onTap: () { Navigator.pop(c); Navigator.push(c, slideUp(const LyricsPage())); }),
       ListTile(leading: const Icon(Icons.info_outline), title: const Text('Audio information'), onTap: () { Navigator.pop(c); infoSheet(c, t); }),
@@ -2215,6 +2219,9 @@ class SettingsPage extends StatelessWidget {
         Center(child: Padding(padding: const EdgeInsets.only(bottom: 8),
             child: Text(sigText.value, style: sigStyle(sigFont.value, sigSize.value, th.tx.withOpacity(.7))))),
       ])),
+      ListTile(leading: const Icon(Icons.celebration_rounded), title: const Text('Music Party'),
+          subtitle: const Text('Play the same song in sync with friends'),
+          onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const PartyPage()))),
       ListTile(leading: const Icon(Icons.sync_rounded), title: const Text('YouTube & Sync'),
           subtitle: const Text('Import your YouTube playlists and share your listening history'),
           onTap: () => Navigator.push(c, MaterialPageRoute(builder: (_) => const YouTubeSyncPage()))),
@@ -3977,6 +3984,964 @@ class _SPS extends State<SonicPortalPage> with SingleTickerProviderStateMixin, W
           AnimatedOpacity(opacity: show ? 1 : 0, duration: const Duration(milliseconds: 400), child: IgnorePointer(ignoring: !show, child: _bottom(c))),
         ])),
       ]),
+    );
+  }
+}
+
+// ---------------- SOUND DNA LAB ----------------
+// A living 3D sculpture of the song. It reads the real FFT (SonicEngine) and lets you shape the sound through
+// Android's real equalizer, so every change is heard immediately. It shows frequency ranges, not isolated
+// instruments (that would need a source-separation model), and Android gives only a mono analysis.
+const dnaNames = ['Bass', 'Vocals', 'Treble', 'Warmth', 'Clarity'];
+const dnaRanges = ['60 to 250 Hz', '300 Hz to 3.4 kHz', '2 to 16 kHz', '180 to 360 Hz', '3.5 to 6.5 kHz'];
+const dnaAbout = [
+  'Power and weight. Kicks and bass lines live here.',
+  'The range where voices and lead instruments sit. It is a frequency range, not isolated vocals.',
+  'Air and sparkle. Cymbals, breath and shine.',
+  'Body and fullness. Too much sounds muddy, too little sounds thin.',
+  'Definition and detail. Makes words and attacks easier to hear.',
+];
+final dnaPresets = ValueNotifier<List<Map<String, dynamic>>>([]);
+
+Future<void> dnaSavePresets() async => (await SharedPreferences.getInstance()).setString('dna_presets', jsonEncode(dnaPresets.value));
+Future<void> dnaLoadPresets(SharedPreferences sp) async {
+  try {
+    final j = jsonDecode(sp.getString('dna_presets') ?? '[]');
+    if (j is List) { dnaPresets.value = [for (final e in j) if (e is Map) Map<String, dynamic>.from(e)]; }
+  } catch (_) {}
+}
+
+String dnaCode(String name, List<double> v) =>
+    'CDNA1.${base64Url.encode(utf8.encode(jsonEncode({'n': name, 'v': [for (final x in v) (x * 100).round() / 100]})))}';
+
+// Returns {name, v} or null when the text is not a valid Sound DNA profile.
+Map<String, dynamic>? dnaParse(String raw) {
+  try {
+    var t = raw.trim();
+    if (t.startsWith('CDNA1.')) { t = utf8.decode(base64Url.decode(base64Url.normalize(t.substring(6)))); }
+    final j = jsonDecode(t);
+    if (j is! Map || j['v'] is! List || (j['v'] as List).length != 5) return null;
+    final v = <double>[for (final x in (j['v'] as List)) m.max(-1.0, m.min(1.0, (x as num).toDouble()))];
+    var n = (j['n'] ?? 'Shared profile').toString().trim();
+    if (n.isEmpty) { n = 'Shared profile'; }
+    if (n.length > 24) { n = n.substring(0, 24); }
+    return {'name': n, 'v': v};
+  } catch (_) { return null; }
+}
+
+double _wg(double f, double c, double oct) {
+  final d = m.log(f / c) / m.ln2 / oct;
+  return m.exp(-d * d / 2);
+}
+
+// How much each of the five controls changes one equalizer band (in dB).
+double dnaBandGain(double f, List<double> v) {
+  final bass = f <= 120 ? 1.0 : (f < 400 ? 1 - (f - 120) / 280 : 0.0);
+  final treble = f >= 9000 ? 1.0 : (f > 4500 ? (f - 4500) / 4500 : 0.0);
+  return v[0] * 9 * bass + v[1] * 7 * _wg(f, 2500, .8) + v[2] * 8 * treble + v[3] * 6 * _wg(f, 280, .7)
+      + v[4] * 6 * _wg(f, 4200, .6) - v[4] * 2.5 * _wg(f, 300, .6);
+}
+
+const _dnaAnchors = [[0.0, -1.55, 0.0], [2.3, .4, 0.0], [0.0, 2.7, 0.0], [-2.3, .4, 0.0], [-1.6, -1.0, 1.7]];
+
+class DnaPainter extends CustomPainter {
+  final SonicEngine e; final _Cam cam; final List<double> vals; final List<Offset> anchors;
+  final int sel, grab, mode; final bool bypass; final double q;
+  DnaPainter(this.e, this.cam, this.vals, this.anchors, this.sel, this.grab, this.mode, this.bypass, this.q, Listenable repaint) : super(repaint: repaint);
+  final List<double> _o = List<double>.filled(4, 0);
+  final List<double> _o2 = List<double>.filled(4, 0);
+
+  double _lvl(int i) {
+    double a(int lo, int hi) { var s = 0.0; for (int k = lo; k <= hi; k++) { s += e.spec[k]; } return s / (hi - lo + 1); }
+    switch (i) {
+      case 0: return e.bass;
+      case 1: return e.vocal;
+      case 2: return e.treble;
+      case 3: return a(12, 18);
+      default: return a(36, 41);
+    }
+  }
+
+  Paint _g(Color col, double op, double w) => Paint()
+    ..style = PaintingStyle.stroke..strokeWidth = w..strokeCap = StrokeCap.round..strokeJoin = StrokeJoin.round
+    ..color = col.withOpacity(m.min(1.0, m.max(0.0, op)))..blendMode = BlendMode.plus;
+
+  void _line(Canvas c, List<Offset> pts, Paint p) {
+    if (pts.length < 2) return;
+    final path = Path()..moveTo(pts[0].dx, pts[0].dy);
+    for (int i = 1; i < pts.length; i++) { path.lineTo(pts[i].dx, pts[i].dy); }
+    c.drawPath(path, p);
+  }
+
+  @override
+  void paint(Canvas c, Size s) {
+    final t = e.clock, rect = Offset.zero & s;
+    c.drawRect(rect, Paint()..color = Colors.black);
+    cam.prep(s);
+    final dim = bypass ? .55 : 1.0;
+    c.drawRect(rect, Paint()..shader = RadialGradient(center: const Alignment(0, .1), radius: .9,
+        colors: [const Color(0xFF3A1A80).withOpacity((.25 + .3 * e.energy) * dim), Colors.transparent]).createShader(rect));
+
+    // BACKGROUND INSTRUMENTS: floating wire cubes around the sculpture (mids)
+    for (int i = 0; i < 12; i++) {
+      final a = t * (.08 + _h(i, 1) * .1) + i * .52, rad = 4.1 + 1.1 * m.sin(i * 1.7) + .35 * e.mid;
+      final sz = .2 + .45 * e.spec[(i * 4) % 48] + .12 * _h(i, 2);
+      final cx = rad * m.cos(a), cz = rad * m.sin(a), cy = 1.4 * m.sin(i * 2.3 + t * .2);
+      final rot = t * (.3 + _h(i, 3)), cr = m.cos(rot), sr = m.sin(rot);
+      final vs = <Offset>[];
+      for (int k = 0; k < 8; k++) {
+        final x = (k & 1 == 0 ? -1.0 : 1.0) * sz, y = (k & 2 == 0 ? -1.0 : 1.0) * sz, z = (k & 4 == 0 ? -1.0 : 1.0) * sz;
+        if (cam.p(cx + x * cr + z * sr, cy + y, cz - x * sr + z * cr, _o)) { vs.add(Offset(_o[0], _o[1])); } else { vs.add(const Offset(-9999, -9999)); }
+      }
+      final op = (.18 + .5 * e.mid) * dim;
+      for (final ed in const [[0, 1], [2, 3], [4, 5], [6, 7], [0, 2], [1, 3], [4, 6], [5, 7], [0, 4], [1, 5], [2, 6], [3, 7]]) {
+        if (vs[ed[0]].dx < -9000 || vs[ed[1]].dx < -9000) continue;
+        c.drawLine(vs[ed[0]], vs[ed[1]], _g(i.isEven ? const Color(0xFF7FE9FF) : const Color(0xFFC9A8FF), op, 1.1));
+      }
+    }
+
+    // BASS: thick, pulsing stacked rings in liquid metal colours
+    final rings = 5;
+    for (int i = 0; i < rings; i++) {
+      final y = (i - 2) * .55, rr = (1.0 + .85 * e.bass + .5 * e.sub + .25 * e.kick) * (1 - .1 * (i - 2).abs()) * (1 + vals[0] * .12);
+      final pts = <Offset>[];
+      final segs = m.max(28, (76 * q).round());
+      for (int k = 0; k <= segs; k++) {
+        final a = k / segs * 6.2832, wob = 1 + .06 * m.sin(a * 3 + t * 1.5 + i) + .1 * e.spec[(k * 47 ~/ segs) % 48];
+        if (!cam.p(rr * wob * m.cos(a), y, rr * wob * m.sin(a), _o)) continue;
+        pts.add(Offset(_o[0], _o[1]));
+      }
+      if (pts.length < 3) continue;
+      cam.p(0, y, 0, _o2);
+      final sw = (.05 + .1 * e.bass + .06 * e.kick) * _o2[3];
+      final ctr = Offset(_o2[0], _o2[1]);
+      final rad = (pts[0] - ctr).distance + sw;
+      final sweep = SweepGradient(colors: const [Color(0xFF8B3DFF), Color(0xFF3FE0FF), Color(0xFFFFFFFF), Color(0xFFB44DFF), Color(0xFF8B3DFF)],
+          transform: GradientRotation(t * .35 + i)).createShader(Rect.fromCircle(center: ctr, radius: rad));
+      final selB = sel == 0 || grab == 0;
+      _line(c, pts, Paint()..style = PaintingStyle.stroke..strokeWidth = sw * 2.4..strokeCap = StrokeCap.round..blendMode = BlendMode.plus
+        ..shader = sweep..color = Colors.white.withOpacity(.14 * dim));
+      _line(c, pts, Paint()..style = PaintingStyle.stroke..strokeWidth = sw..strokeCap = StrokeCap.round..blendMode = BlendMode.plus..shader = sweep);
+      _line(c, pts, _g(Colors.white, (.5 + (selB ? .35 : 0)) * dim, 1.4));
+    }
+    if (cam.p(0, 0, 0, _o)) {
+      final r = (60 + 140 * e.sub + 90 * e.kick) * _o[3] / 120, gc = Rect.fromCircle(center: Offset(_o[0], _o[1]), radius: r * 2);
+      c.drawCircle(gc.center, gc.width / 2, Paint()..blendMode = BlendMode.plus..shader = RadialGradient(colors: [
+        const Color(0xFFB36BFF).withOpacity((.5 + .35 * e.kick) * dim), Colors.transparent]).createShader(gc));
+    }
+
+    // VOCALS: flowing ribbons of light
+    for (int rb = 0; rb < 3; rb++) {
+      final pts = <Offset>[];
+      final n = m.max(36, (96 * q).round());
+      for (int k = 0; k <= n; k++) {
+        final u = k / n, a = u * 9.4 + t * (.42 + rb * .13) + rb * 2.1;
+        final rad = 2.0 + .5 * m.sin(u * 9 + t * 1.3 + rb) + (.9 * e.vocal + vals[1] * .25) * m.sin(u * 5 - t * 2.2);
+        final y = (u - .5) * 3.6 + .35 * m.sin(u * 7 + t + rb);
+        if (!cam.p(rad * m.cos(a), y, rad * m.sin(a), _o)) continue;
+        pts.add(Offset(_o[0], _o[1]));
+      }
+      final lit = (.25 + .6 * e.vocal + (sel == 1 || grab == 1 ? .2 : 0)) * dim;
+      _line(c, pts, _g(const Color(0xFF3FE0FF), lit * .35, 14 + 12 * e.vocal));
+      _line(c, pts, _g(const Color(0xFF9BF1FF), lit * .7, 5 + 4 * e.vocal));
+      _line(c, pts, _g(Colors.white, lit, 1.5));
+    }
+
+    // TREBLE: fine sparkling particles on an outer shell
+    final cnt = m.min(320, (240 * q).round());
+    final small = Float32List(cnt * 2), big = Float32List(cnt * 2);
+    var ns = 0, nb = 0;
+    final bucket = (t * 10).floor();
+    for (int i = 0; i < cnt; i++) {
+      final u = _h(i, 11) * 2 - 1, th = _h(i, 12) * 6.2832 + t * .05, sq = m.sqrt(1 - u * u), rad = 3.3 + _h(i, 13) * 1.4;
+      if (!cam.p(rad * sq * m.cos(th), rad * u * 1.15, rad * sq * m.sin(th), _o)) continue;
+      final live = _h(i, bucket) < .08 + e.treble * 1.4 + (vals[2] > 0 ? vals[2] * .2 : 0);
+      if (!live) continue;
+      if (_h(i, bucket + 77) > .8) { big[nb++] = _o[0]; big[nb++] = _o[1]; } else { small[ns++] = _o[0]; small[ns++] = _o[1]; }
+    }
+    c.drawRawPoints(PointMode.points, small.sublist(0, ns), Paint()..color = const Color(0xFFBFF4FF).withOpacity(.8 * dim)..strokeWidth = 1.8..strokeCap = StrokeCap.round..blendMode = BlendMode.plus);
+    c.drawRawPoints(PointMode.points, big.sublist(0, nb), Paint()..color = Colors.white.withOpacity(.95 * dim)..strokeWidth = 4..strokeCap = StrokeCap.round..blendMode = BlendMode.plus);
+
+    // DRUMS: shockwaves, sharp spikes on kicks, flashing triangles on snares
+    for (final w in e.waves) {
+      final age = e.clock - w;
+      if (age < 0 || age > 2.0) continue;
+      final r = .9 + age * 5.0, fade = 1 - age / 2.0, pts = <Offset>[];
+      for (int i = 0; i <= 90; i++) {
+        final a = i / 90 * 6.2832;
+        if (!cam.p(r * m.cos(a), 0, r * m.sin(a), _o)) continue;
+        pts.add(Offset(_o[0], _o[1]));
+      }
+      _line(c, pts, _g(const Color(0xFF7FE9FF), .85 * fade * dim, 2.6 * fade + .6));
+    }
+    if (e.kick > .06) {
+      for (int i = 0; i < 16; i++) {
+        final u = 1 - 2 * (i + .5) / 16, th = i * 2.39996, sq = m.sqrt(1 - u * u);
+        final dx = sq * m.cos(th), dy = u, dz = sq * m.sin(th), r0 = .7, r1 = r0 + .8 + 2.4 * e.kick;
+        if (!cam.p(dx * r0, dy * r0, dz * r0, _o) || !cam.p(dx * r1, dy * r1, dz * r1, _o2)) continue;
+        c.drawLine(Offset(_o[0], _o[1]), Offset(_o2[0], _o2[1]), _g(Colors.white, e.kick * dim, 1.8));
+      }
+    }
+    if (e.snare > .06) {
+      for (int k = 0; k < 4; k++) {
+        final a0 = t * .8 + k * 1.57, pts = <Offset>[];
+        for (int i = 0; i <= 3; i++) {
+          final a = a0 + i * 2.0944;
+          if (!cam.p(2.6 * m.cos(a), (k - 1.5) * .7, 2.6 * m.sin(a), _o)) continue;
+          pts.add(Offset(_o[0], _o[1]));
+        }
+        _line(c, pts, _g(const Color(0xFFE6D5FF), e.snare * .9 * dim, 2));
+      }
+    }
+
+    // REGIONS: glowing handles with live level rings and labels
+    if (mode != 2) {
+      for (int i = 0; i < 5; i++) {
+        final a = _dnaAnchors[i];
+        if (!cam.p(a[0], a[1], a[2], _o)) { anchors[i] = const Offset(-9999, -9999); continue; }
+        final ctr = Offset(_o[0], _o[1]);
+        anchors[i] = ctr;
+        final on = sel == i || grab == i, lvl = _lvl(i);
+        c.drawCircle(ctr, 20 + (on ? 8 : 0), Paint()..color = Colors.white.withOpacity(on ? .16 : .06)..style = PaintingStyle.fill);
+        c.drawArc(Rect.fromCircle(center: ctr, radius: 22 + (on ? 8 : 0)), -1.5708, 6.2832 * m.min(1.0, lvl), false, _g(const Color(0xFF7FE9FF), on ? 1 : .7, 3));
+        final v = vals[i];
+        if (mode == 1 && v.abs() > .02) {
+          c.drawArc(Rect.fromCircle(center: ctr, radius: 30 + (on ? 8 : 0)), -1.5708, 6.2832 * v.abs() * .5, false, _g(v > 0 ? const Color(0xFFB36BFF) : const Color(0xFFFFB86B), .9, 2.4));
+        }
+        final tp = TextPainter(text: TextSpan(text: dnaNames[i].toUpperCase(), style: TextStyle(color: Colors.white.withOpacity(on ? 1 : .6), fontSize: 10, letterSpacing: 2.2, fontWeight: FontWeight.w500)),
+            textDirection: TextDirection.ltr)..layout();
+        tp.paint(c, Offset(ctr.dx - tp.width / 2, ctr.dy + 36 + (on ? 6 : 0)));
+      }
+    }
+    c.drawRect(rect, Paint()..shader = RadialGradient(radius: .95, colors: [Colors.transparent, Colors.black.withOpacity(.7)], stops: const [.5, 1]).createShader(rect));
+  }
+
+  @override
+  bool shouldRepaint(covariant DnaPainter o) => true;
+}
+
+class SoundDnaPage extends StatefulWidget { const SoundDnaPage({super.key}); @override State<SoundDnaPage> createState() => _DNS(); }
+class _DNS extends State<SoundDnaPage> with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+  final eng = SonicEngine();
+  final cam = _Cam();
+  final frame = ValueNotifier<int>(0);
+  final anchors = List<Offset>.filled(5, const Offset(-9999, -9999));
+  final vals = List<double>.filled(5, 0);
+  late final Ticker tk;
+  Duration _last = Duration.zero;
+  int mode = 0, sel = -1, grab = -1;
+  bool bypass = false, _drag = false, _warned = false;
+  double _acc = 0, _z0 = 7, q = 1;
+  int _n = 0;
+  String status = '', presetName = '';
+  Timer? _applyT;
+  AndroidEqualizerParameters? _ps;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    cam.dist = 7.5;
+    tk = createTicker(_tick)..start();
+    _start();
+  }
+
+  Future<void> _start() async {
+    final r = await eng.start();
+    if (mounted) { setState(() => status = r == 'ok' ? '' : r); }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState st) {
+    if (st == AppLifecycleState.paused) { eng.stop(); }
+    if (st == AppLifecycleState.resumed) { _start(); }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _applyT?.cancel();
+    tk.dispose();
+    eng.stop();
+    frame.dispose();
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    super.dispose();
+  }
+
+  void _tick(Duration d) {
+    final dt = m.min(.05, (d - _last).inMicroseconds / 1e6);
+    _last = d;
+    if (dt <= 0) return;
+    eng.tick(dt);
+    if (!_drag) { cam.yaw += dt * (.04 + .08 * eng.energy); }
+    _acc += dt; _n++;
+    if (_n >= 45) {
+      final avg = _acc / _n;
+      if (avg > .024 && q > .45) { q -= .1; } else if (avg < .0175 && q < 1) { q += .05; }
+      _acc = 0; _n = 0;
+    }
+    frame.value++;
+  }
+
+  // Sends the five controls to the real Android equalizer.
+  Future<void> _apply() async {
+    if (!Platform.isAndroid) return;
+    try {
+      _ps ??= await eq.parameters.timeout(const Duration(seconds: 3));
+      final ps = _ps!;
+      final flat = vals.every((x) => x.abs() < .01);
+      await eq.setEnabled(!bypass && !flat ? true : (bypass ? false : eq.enabled && !flat));
+      for (final b in ps.bands) {
+        final g = dnaBandGain(b.centerFrequency, vals);
+        await b.setGain(m.max(ps.minDecibels, m.min(ps.maxDecibels, g)));
+      }
+    } catch (_) {
+      if (!_warned && mounted) { _warned = true; snack('Play a song first so the equalizer can attach.'); }
+    }
+  }
+
+  void _schedule() { _applyT?.cancel(); _applyT = Timer(const Duration(milliseconds: 60), _apply); }
+
+  // Saves the result to the Equalizer tab so it stays after you leave the Lab.
+  Future<void> _persist() async {
+    try {
+      final ps = _ps;
+      if (ps == null) return;
+      final sp = await SharedPreferences.getInstance();
+      await sp.setBool('eqon', vals.any((x) => x.abs() >= .01));
+      await sp.setStringList('eqg', ps.bands.map((b) => b.gain.toString()).toList());
+    } catch (_) {}
+  }
+
+  void _setVals(List<double> v, {String name = ''}) {
+    setState(() { for (int i = 0; i < 5; i++) { vals[i] = v[i]; } presetName = name; bypass = false; });
+    _apply().then((_) => _persist());
+  }
+
+  int _near(Offset p, double maxD) {
+    var best = -1;
+    var bd = maxD;
+    for (int i = 0; i < 5; i++) {
+      final d = (anchors[i] - p).distance;
+      if (d < bd) { bd = d; best = i; }
+    }
+    return best;
+  }
+
+  Widget _glass(Widget child, {double radius = 26}) => ClipRRect(borderRadius: BorderRadius.circular(radius), child: BackdropFilter(
+      filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
+      child: Container(decoration: BoxDecoration(color: Colors.white.withOpacity(.07), borderRadius: BorderRadius.circular(radius),
+          border: Border.all(color: Colors.white.withOpacity(.14))), child: child)));
+
+  Widget _top(BuildContext c) => Padding(padding: const EdgeInsets.fromLTRB(8, 4, 8, 0), child: Row(children: [
+        IconButton(tooltip: 'Exit', icon: const Icon(Icons.close_rounded, color: Colors.white), onPressed: () => Navigator.pop(c)),
+        Expanded(child: Center(child: _glass(Row(mainAxisSize: MainAxisSize.min, children: [
+          for (int i = 0; i < 3; i++) GestureDetector(
+              onTap: () => setState(() => mode = i),
+              child: AnimatedContainer(duration: const Duration(milliseconds: 250), padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
+                  decoration: BoxDecoration(borderRadius: BorderRadius.circular(22), color: mode == i ? Colors.white.withOpacity(.2) : Colors.transparent),
+                  child: Text(['DISCOVER', 'MANIPULATE', 'CREATE'][i], style: TextStyle(color: Colors.white.withOpacity(mode == i ? 1 : .55), fontSize: 11, letterSpacing: 1.8, fontWeight: FontWeight.w500)))),
+        ]), radius: 24))),
+        GestureDetector(
+            onTap: () { setState(() => bypass = !bypass); _apply(); HapticFeedback.selectionClick(); },
+            child: Container(padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9), margin: const EdgeInsets.only(right: 4),
+                decoration: BoxDecoration(borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.white.withOpacity(.4)),
+                    color: bypass ? Colors.white.withOpacity(.25) : Colors.transparent),
+                child: Text(bypass ? 'ORIGINAL' : 'MODIFIED', style: const TextStyle(color: Colors.white, fontSize: 10, letterSpacing: 1.6)))),
+      ]));
+
+  Widget _meter(double v, Color col) => ClipRRect(borderRadius: BorderRadius.circular(3), child: SizedBox(height: 4,
+      child: LinearProgressIndicator(value: m.max(0.0, m.min(1.0, v)), backgroundColor: Colors.white12, valueColor: AlwaysStoppedAnimation(col))));
+
+  Widget _discover() {
+    final i = sel;
+    return Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 16), child: _glass(Padding(padding: const EdgeInsets.all(16), child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+      if (i < 0) ...[
+        const Text('Tap a glowing region to inspect it', style: TextStyle(color: Colors.white, fontSize: 15)),
+        const SizedBox(height: 6),
+        Text('Drag to turn the sculpture. Pinch to zoom. Nothing you do here changes the sound.', style: TextStyle(color: Colors.white.withOpacity(.6), fontSize: 12)),
+      ] else ...[
+        Row(children: [
+          Text(dnaNames[i].toUpperCase(), style: const TextStyle(color: Colors.white, fontSize: 15, letterSpacing: 3, fontWeight: FontWeight.w600)),
+          const SizedBox(width: 10),
+          Text(dnaRanges[i], style: TextStyle(color: Colors.white.withOpacity(.6), fontSize: 12)),
+        ]),
+        const SizedBox(height: 8),
+        ValueListenableBuilder<int>(valueListenable: frame, builder: (_, __, ___) {
+          final lv = i == 0 ? eng.bass : i == 1 ? eng.vocal : i == 2 ? eng.treble : i == 3 ? (eng.spec.sublist(12, 19).reduce((a, b) => a + b) / 7) : (eng.spec.sublist(36, 42).reduce((a, b) => a + b) / 6);
+          return Row(children: [Expanded(child: _meter(lv, const Color(0xFF7FE9FF))), const SizedBox(width: 10),
+            Text('${(lv * 100).round()}%', style: const TextStyle(color: Colors.white, fontSize: 12))]);
+        }),
+        const SizedBox(height: 8),
+        Text(dnaAbout[i], style: TextStyle(color: Colors.white.withOpacity(.75), fontSize: 12.5)),
+      ],
+      const SizedBox(height: 10),
+      ValueListenableBuilder<int>(valueListenable: frame, builder: (_, __, ___) => Text(
+          'Bass ${(eng.bass * 100).round()}%   Mids ${(eng.mid * 100).round()}%   Treble ${(eng.treble * 100).round()}%   Energy ${(eng.energy * 100).round()}%',
+          style: TextStyle(color: Colors.white.withOpacity(.8), fontSize: 11.5, letterSpacing: .4))),
+      const SizedBox(height: 4),
+      Text('Stereo spread is not available: Android shares a single mixed reading. Cadence shows frequency ranges and cannot isolate single instruments.',
+          style: TextStyle(color: Colors.white.withOpacity(.45), fontSize: 10.5)),
+    ]))));
+  }
+
+  Widget _manipulate() {
+    final i = sel < 0 ? 0 : sel;
+    return Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 16), child: _glass(Padding(padding: const EdgeInsets.all(14), child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text('Grab a glowing region and drag it up or down. You hear it right away.', style: TextStyle(color: Colors.white.withOpacity(.75), fontSize: 12.5)),
+      const SizedBox(height: 10),
+      SingleChildScrollView(scrollDirection: Axis.horizontal, child: Row(children: [
+        for (int k = 0; k < 5; k++) Padding(padding: const EdgeInsets.only(right: 8), child: GestureDetector(
+            onTap: () => setState(() => sel = k),
+            child: Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(borderRadius: BorderRadius.circular(18), color: sel == k ? Colors.white.withOpacity(.2) : Colors.white.withOpacity(.05),
+                    border: Border.all(color: Colors.white.withOpacity(sel == k ? .5 : .15))),
+                child: Text('${dnaNames[k]} ${vals[k] >= 0 ? '+' : ''}${(vals[k] * 9).toStringAsFixed(1)} dB', style: const TextStyle(color: Colors.white, fontSize: 11.5))))),
+      ])),
+      SliderTheme(data: SliderTheme.of(context).copyWith(trackHeight: 2, activeTrackColor: Colors.white, inactiveTrackColor: Colors.white24, thumbColor: Colors.white),
+          child: Slider(value: vals[i], min: -1, max: 1, onChanged: (v) { setState(() { vals[i] = v; sel = i; presetName = ''; }); _schedule(); }, onChangeEnd: (_) { _apply().then((_) => _persist()); })),
+      Row(children: [
+        TextButton.icon(onPressed: () => _setVals([0, 0, 0, 0, 0]), icon: const Icon(Icons.restart_alt_rounded, size: 18, color: Colors.white70), label: const Text('Reset', style: TextStyle(color: Colors.white70))),
+        const Spacer(),
+        Text('Stereo width is not available on Android', style: TextStyle(color: Colors.white.withOpacity(.4), fontSize: 10.5)),
+      ]),
+    ]))));
+  }
+
+  Future<void> _savePreset(BuildContext c) async {
+    final n = await askText(c, 'Name this sound profile', presetName, maxLen: 24);
+    if (n == null || n.trim().isEmpty) return;
+    final name = n.trim();
+    final list = [for (final p in dnaPresets.value) if (p['name'] != name) p];
+    list.add({'name': name, 'v': [for (final x in vals) x]});
+    dnaPresets.value = list;
+    await dnaSavePresets();
+    setState(() => presetName = name);
+    snack('Saved "$name".');
+  }
+
+  Future<void> _importPreset() async {
+    final d = await Clipboard.getData('text/plain');
+    final p = dnaParse(d?.text ?? '');
+    if (p == null) { snack('The clipboard does not hold a Sound DNA profile. Copy a share code first.'); return; }
+    var name = p['name'].toString();
+    while (dnaPresets.value.any((x) => x['name'] == name)) { name = '$name (2)'; }
+    dnaPresets.value = [...dnaPresets.value, {'name': name, 'v': p['v']}];
+    await dnaSavePresets();
+    snack('Added "$name".');
+  }
+
+  void _presetMenu(BuildContext c, Map<String, dynamic> p) {
+    _sheet(c, Column(mainAxisSize: MainAxisSize.min, children: [
+      ListTile(leading: const Icon(Icons.play_arrow_rounded), title: const Text('Apply'), onTap: () { Navigator.pop(c); _setVals([for (final x in p['v'] as List) (x as num).toDouble()], name: p['name'].toString()); }),
+      ListTile(leading: const Icon(Icons.ios_share_rounded), title: const Text('Copy share code'), onTap: () async {
+        Navigator.pop(c);
+        await Clipboard.setData(ClipboardData(text: dnaCode(p['name'].toString(), [for (final x in p['v'] as List) (x as num).toDouble()])));
+        snack('Share code copied. Anyone with Cadence can paste it under Import.');
+      }),
+      ListTile(leading: const Icon(Icons.delete_outline_rounded), title: const Text('Delete'), onTap: () async {
+        Navigator.pop(c);
+        dnaPresets.value = [for (final x in dnaPresets.value) if (x['name'] != p['name']) x];
+        await dnaSavePresets();
+      }),
+    ]));
+  }
+
+  Widget _create(BuildContext c) => Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 16), child: _glass(Padding(padding: const EdgeInsets.all(14), child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Expanded(child: Text(presetName.isEmpty ? 'Current sound' : presetName, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500))),
+          TextButton.icon(onPressed: () => _savePreset(c), icon: const Icon(Icons.bookmark_add_rounded, size: 18, color: Colors.white), label: const Text('Save', style: TextStyle(color: Colors.white))),
+          TextButton.icon(onPressed: () async {
+            await Clipboard.setData(ClipboardData(text: dnaCode(presetName.isEmpty ? 'My sound' : presetName, vals)));
+            snack('Share code copied.');
+          }, icon: const Icon(Icons.ios_share_rounded, size: 18, color: Colors.white), label: const Text('Share', style: TextStyle(color: Colors.white))),
+          TextButton.icon(onPressed: _importPreset, icon: const Icon(Icons.download_rounded, size: 18, color: Colors.white), label: const Text('Import', style: TextStyle(color: Colors.white))),
+        ]),
+        const SizedBox(height: 6),
+        ValueListenableBuilder<List<Map<String, dynamic>>>(valueListenable: dnaPresets, builder: (_, l, __) => l.isEmpty
+            ? Text('No profiles yet. Shape the sound in Manipulate, then save it here.', style: TextStyle(color: Colors.white.withOpacity(.6), fontSize: 12.5))
+            : SingleChildScrollView(scrollDirection: Axis.horizontal, child: Row(children: [
+                for (final p in l) Padding(padding: const EdgeInsets.only(right: 8), child: GestureDetector(
+                    onTap: () => _setVals([for (final x in p['v'] as List) (x as num).toDouble()], name: p['name'].toString()),
+                    onLongPress: () => _presetMenu(c, p),
+                    child: Container(padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                        decoration: BoxDecoration(borderRadius: BorderRadius.circular(20), color: presetName == p['name'] ? Colors.white.withOpacity(.25) : Colors.white.withOpacity(.07),
+                            border: Border.all(color: Colors.white.withOpacity(presetName == p['name'] ? .6 : .18))),
+                        child: Text(p['name'].toString(), style: const TextStyle(color: Colors.white, fontSize: 12.5))))),
+              ]))),
+        const SizedBox(height: 6),
+        Text('Tap a profile to switch instantly. Long-press for share and delete. Use ORIGINAL / MODIFIED at the top to compare.', style: TextStyle(color: Colors.white.withOpacity(.45), fontSize: 10.5)),
+      ]))));
+
+  @override
+  Widget build(BuildContext c) => Scaffold(
+        backgroundColor: Colors.black,
+        body: Stack(children: [
+          Positioned.fill(child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onDoubleTap: () { cam.yaw = .5; cam.pitch = .18; cam.dist = 7.5; },
+              onTapUp: (d) { final k = _near(d.localPosition, 60); setState(() => sel = k); },
+              onScaleStart: (d) {
+                _z0 = cam.dist;
+                grab = mode == 1 ? _near(d.localFocalPoint, 70) : -1;
+                if (grab >= 0) { sel = grab; HapticFeedback.selectionClick(); setState(() {}); } else { _drag = true; }
+              },
+              onScaleUpdate: (d) {
+                if (grab >= 0) {
+                  vals[grab] = m.max(-1.0, m.min(1.0, vals[grab] - d.focalPointDelta.dy * .006));
+                  presetName = '';
+                  _schedule();
+                  setState(() {});
+                } else {
+                  cam.yaw += d.focalPointDelta.dx * .008;
+                  cam.pitch = m.max(-1.2, m.min(1.2, cam.pitch - d.focalPointDelta.dy * .006));
+                  if (d.scale != 1) { cam.dist = m.max(4.0, m.min(14.0, _z0 / d.scale)); }
+                }
+              },
+              onScaleEnd: (_) {
+                if (grab >= 0) { _apply().then((_) => _persist()); }
+                grab = -1; _drag = false; setState(() {});
+              },
+              child: RepaintBoundary(child: CustomPaint(size: Size.infinite, painter: DnaPainter(eng, cam, vals, anchors, sel, grab, mode, bypass, q, frame))))),
+          if (status.isNotEmpty) Center(child: Padding(padding: const EdgeInsets.all(28), child: _glass(Padding(padding: const EdgeInsets.all(20), child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Icon(Icons.graphic_eq_rounded, color: Colors.white, size: 36), const SizedBox(height: 10),
+            Text(status, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 14)), const SizedBox(height: 14),
+            Wrap(spacing: 10, children: [FilledButton(onPressed: _start, child: const Text('Retry')), TextButton(onPressed: () => openAppSettings(), child: const Text('Open settings'))]),
+          ]))))),
+          SafeArea(child: Column(children: [
+            _top(c),
+            Padding(padding: const EdgeInsets.only(top: 6), child: StreamBuilder<SequenceState?>(stream: player.sequenceStateStream, builder: (_, s) {
+              final t = curTrack(s.data);
+              return Text(t == null ? '' : '${t.title}  -  ${t.artist}', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: Colors.white.withOpacity(.55), fontSize: 11.5, letterSpacing: 1));
+            })),
+            const Spacer(),
+            mode == 0 ? _discover() : mode == 1 ? _manipulate() : _create(c),
+          ])),
+        ]),
+      );
+}
+
+void openDna(BuildContext c) => Navigator.push(c, PageRouteBuilder<void>(
+    opaque: true, transitionDuration: const Duration(milliseconds: 600),
+    pageBuilder: (_, __, ___) => const SoundDnaPage(),
+    transitionsBuilder: (_, a, __, child) => FadeTransition(opacity: a, child: child)));
+
+// ---------------- MUSIC PARTY ----------------
+// Phones on the same Wi-Fi (or a friend's hotspot) play the same song in sync. The host's phone is the clock:
+// guests measure the time difference to the host, then follow the host's play, pause, seek and song changes.
+// Nothing is uploaded and no music files are copied between phones. Each phone plays its own copy of the song
+// (a matching file in its library, or the same online track).
+const partyPort = 48765;
+
+Track? currentTrackNow() {
+  final seq = player.sequence, i = player.currentIndex;
+  if (seq == null || i == null || i < 0 || i >= seq.length) return null;
+  final tag = seq[i].tag;
+  return tag is MediaItem ? (lib.byPath[tag.id] ?? onlineByUrl[tag.id]) : null;
+}
+
+String _ipEnc(String ip) {
+  final p = ip.split('.').map(int.parse).toList();
+  final n = (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
+  return n.toRadixString(36).toUpperCase();
+}
+
+String? _ipDec(String c) {
+  final n = int.tryParse(c.toLowerCase(), radix: 36);
+  if (n == null || n <= 0 || n > 0xFFFFFFFF) return null;
+  return '${(n >> 24) & 255}.${(n >> 16) & 255}.${(n >> 8) & 255}.${n & 255}';
+}
+
+Future<String?> _myIp() async {
+  final ifs = await NetworkInterface.list(type: InternetAddressType.IPv4, includeLoopback: false);
+  String? best;
+  for (final i in ifs) {
+    for (final a in i.addresses) {
+      final p = a.address.split('.').map(int.parse).toList();
+      final priv = p[0] == 10 || (p[0] == 192 && p[1] == 168) || (p[0] == 172 && p[1] >= 16 && p[1] <= 31);
+      if (!priv) continue;
+      final wl = i.name.toLowerCase().contains('wlan') || i.name.toLowerCase().contains('ap');
+      if (best == null || wl) { best = a.address; }
+    }
+  }
+  return best;
+}
+
+int _nowUs() => DateTime.now().microsecondsSinceEpoch;
+
+class PartyHub extends ChangeNotifier {
+  bool hosting = false, joined = false, allowControl = false;
+  String code = '', pin = '', hostName = '', missing = '', error = '', myName = 'Friend';
+  double userOffsetMs = 0;
+  int offsetUs = 0, rttUs = 0;
+  Map<String, dynamic>? last;
+  List<String> members = [];
+  String loadedKey = '';
+
+  HttpServer? _srv;
+  final List<WebSocket> _clients = [];
+  final Map<WebSocket, String> _names = {};
+  WebSocket? _ws;
+  Timer? _tHost, _tFollow, _tPing, _tDeb, _tStart;
+  final List<StreamSubscription<dynamic>> _subs = [];
+  final List<List<int>> _samples = [];
+  bool _following = false, _loading = false;
+
+  // ---------------- host ----------------
+  Future<String?> host() async {
+    try {
+      await leave();
+      final ip = await _myIp();
+      if (ip == null) { return 'Connect to Wi-Fi first, or turn on your hotspot and have your friends join it.'; }
+      _srv = await HttpServer.bind(InternetAddress.anyIPv4, partyPort, shared: true);
+      pin = (1000 + m.Random().nextInt(9000)).toString();
+      code = '${_ipEnc(ip)}-$pin';
+      hosting = true;
+      _srv!.listen(_onRequest, onError: (_) {});
+      _subs.add(player.playingStream.listen((_) => _debounce()));
+      _subs.add(player.positionDiscontinuityStream.listen((_) => _debounce()));
+      _subs.add(player.currentIndexStream.listen((_) => _debounce()));
+      _tHost = Timer.periodic(const Duration(seconds: 2), (_) => _broadcast());
+      notifyListeners();
+      return null;
+    } catch (e) {
+      hosting = false;
+      return 'Could not start the party: $e';
+    }
+  }
+
+  void _debounce() { _tDeb?.cancel(); _tDeb = Timer(const Duration(milliseconds: 120), _broadcast); }
+
+  Map<String, dynamic> _snapshot() {
+    final t = currentTrackNow();
+    return {
+      't': 'state', 'play': player.playing, 'pos': player.position.inMilliseconds, 'at': _nowUs(),
+      'k': t == null ? '' : (t.path.startsWith('http') ? t.path : '${t.title}|${t.artist}|${(t.dur / 1000).round()}'),
+      'trk': t == null ? null : {'u': t.path.startsWith('http') ? t.path : '', 't': t.title, 'a': t.artist, 'al': t.album, 'd': t.dur, 'c': onlineCover[t.path] ?? ''},
+      'members': _names.values.toList(), 'allow': allowControl,
+    };
+  }
+
+  void _broadcast() {
+    if (!hosting || _clients.isEmpty) return;
+    final msg = jsonEncode(_snapshot());
+    for (final w in List<WebSocket>.of(_clients)) { try { w.add(msg); } catch (_) {} }
+  }
+
+  Future<void> _onRequest(HttpRequest r) async {
+    try {
+      if (!WebSocketTransformer.isUpgradeRequest(r)) { r.response.statusCode = 404; await r.response.close(); return; }
+      final ws = await WebSocketTransformer.upgrade(r);
+      var ok = false;
+      ws.listen((dynamic d) {
+        try {
+          final j = jsonDecode(d as String) as Map;
+          final t = j['t'];
+          if (t == 'hello') {
+            if (j['pin'].toString() != pin) { ws.add(jsonEncode({'t': 'deny'})); ws.close(); return; }
+            ok = true;
+            _clients.add(ws);
+            _names[ws] = (j['name'] ?? 'Friend').toString();
+            ws.add(jsonEncode({'t': 'welcome', 'host': myName, 'allow': allowControl}));
+            members = _names.values.toList();
+            ws.add(jsonEncode(_snapshot()));
+            notifyListeners();
+          } else if (!ok) {
+            return;
+          } else if (t == 'ping') {
+            ws.add(jsonEncode({'t': 'pong', 'c': j['c'], 'h': _nowUs()}));
+          } else if (t == 'cmd' && allowControl) {
+            final c = j['c'].toString();
+            if (c == 'toggle') { if (player.playing) { player.pause(); } else { player.play(); } }
+            else if (c == 'next') { skipNext(); }
+            else if (c == 'prev') { player.seekToPrevious(); }
+          }
+        } catch (_) {}
+      }, onDone: () { _clients.remove(ws); _names.remove(ws); members = _names.values.toList(); notifyListeners(); },
+          onError: (_) { _clients.remove(ws); _names.remove(ws); });
+    } catch (_) {}
+  }
+
+  void setAllow(bool v) { allowControl = v; _broadcast(); notifyListeners(); }
+
+  // ---------------- guest ----------------
+  Future<String?> join(String raw, String name) async {
+    try {
+      await leave();
+      myName = name.trim().isEmpty ? 'Friend' : name.trim();
+      final parts = raw.trim().split(RegExp(r'[\s\-]+')).where((s) => s.isNotEmpty).toList();
+      if (parts.length < 2) { return 'Enter the party code, like 1X2Y3Z-4821.'; }
+      final p = parts.last;
+      final first = parts.first;
+      final ip = first.contains('.') ? first : _ipDec(first);
+      if (ip == null) { return 'That party code is not valid.'; }
+      final ws = await WebSocket.connect('ws://$ip:$partyPort').timeout(const Duration(seconds: 6));
+      _ws = ws;
+      ws.add(jsonEncode({'t': 'hello', 'name': myName, 'pin': p}));
+      ws.listen(_onGuestMsg, onDone: () { if (joined) { error = 'The host ended the party.'; _teardownGuest(); } }, onError: (_) { _teardownGuest(); });
+      for (int i = 0; i < 40 && !joined && _ws != null; i++) { await Future.delayed(const Duration(milliseconds: 100)); }
+      if (!joined) { final e = error.isEmpty ? 'The host did not answer. Check the code and that you share the same Wi-Fi.' : error; await leave(); return e; }
+      return null;
+    } catch (e) {
+      await leave();
+      return 'Could not connect. Make sure you are on the same Wi-Fi as the host. ($e)';
+    }
+  }
+
+  void _onGuestMsg(dynamic d) {
+    try {
+      final j = jsonDecode(d as String) as Map;
+      final t = j['t'];
+      if (t == 'welcome') {
+        joined = true; hostName = (j['host'] ?? 'Host').toString(); allowControl = j['allow'] == true; error = '';
+        _samples.clear();
+        _ping();
+        var n = 0;
+        _tPing = Timer.periodic(const Duration(milliseconds: 250), (tm) { _ping(); if (++n >= 8) { tm.cancel(); _tPing = Timer.periodic(const Duration(seconds: 4), (_) => _ping()); } });
+        _tFollow = Timer.periodic(const Duration(milliseconds: 500), (_) => _follow());
+        notifyListeners();
+      } else if (t == 'deny') {
+        error = 'Wrong code or PIN.';
+      } else if (t == 'pong') {
+        final t1 = _nowUs(), t0 = (j['c'] as num).toInt(), h = (j['h'] as num).toInt(), r = t1 - t0;
+        _samples.add([r, h - (t0 + r ~/ 2)]);
+        if (_samples.length > 10) { _samples.removeAt(0); }
+        var best = _samples.first;
+        for (final s in _samples) { if (s[0] < best[0]) { best = s; } }
+        rttUs = best[0]; offsetUs = best[1];
+        notifyListeners();
+      } else if (t == 'state') {
+        last = Map<String, dynamic>.from(j);
+        members = [for (final x in (j['members'] as List? ?? [])) x.toString()];
+        allowControl = j['allow'] == true;
+        notifyListeners();
+        _follow();
+      }
+    } catch (_) {}
+  }
+
+  void _ping() { try { _ws?.add(jsonEncode({'t': 'ping', 'c': _nowUs()})); } catch (_) {} }
+
+  void sendCmd(String c) { try { _ws?.add(jsonEncode({'t': 'cmd', 'c': c})); } catch (_) {} }
+
+  Track? _matchLocal(Map trk) {
+    final tw = _words(trk['t'].toString()), aw = _words(trk['a'].toString());
+    final d = (trk['d'] as num?)?.toInt() ?? 0;
+    for (final t in lib.tracks) {
+      if (d > 0 && (t.dur - d).abs() > 3000) continue;
+      final w = _words(t.title);
+      if (w.length != tw.length || !w.containsAll(tw)) continue;
+      final a = _words(t.artist);
+      if (aw.isNotEmpty && a.isNotEmpty && a.intersection(aw).isEmpty) continue;
+      return t;
+    }
+    return null;
+  }
+
+  Future<void> _ensureTrack(Map<String, dynamic> st) async {
+    final key = (st['k'] ?? '').toString();
+    final trk = st['trk'];
+    if (key.isEmpty || trk is! Map || key == loadedKey || _loading) return;
+    _loading = true;
+    try {
+      Track? t;
+      final u = (trk['u'] ?? '').toString();
+      if (u.isNotEmpty) {
+        t = Track({'p': u, 't': (trk['t'] ?? 'Untitled').toString(), 'a': (trk['a'] ?? '').toString(), 'al': (trk['al'] ?? '').toString(),
+          'f': 'Party', 'd': (trk['d'] as num?)?.toInt() ?? 0, 's': 0, 'ad': 0, 'prov': 'party'});
+        onlineByUrl[u] = t;
+        final cv = (trk['c'] ?? '').toString();
+        if (cv.isNotEmpty) { onlineCover[u] = cv; }
+      } else {
+        t = _matchLocal(trk);
+      }
+      loadedKey = key;
+      if (t == null) {
+        missing = '"${trk['t']}" is not on this phone, so you will hear nothing until the next song.';
+        await player.pause();
+      } else {
+        missing = '';
+        await player.setAudioSource(ConcatenatingAudioSource(children: [_src(t)], shuffleOrder: NextShuffleOrder()));
+      }
+      notifyListeners();
+    } catch (_) {
+      missing = 'This song could not be loaded.';
+    } finally { _loading = false; }
+  }
+
+  // Keeps this phone locked to the host: starts, pauses, seeks, and nudges the speed to remove small drift.
+  Future<void> _follow() async {
+    final st = last;
+    if (st == null || !joined || _following) return;
+    _following = true;
+    try {
+      await _ensureTrack(st);
+      if (missing.isNotEmpty || _loading || (st['k'] ?? '').toString() != loadedKey) return;
+      final hostNow = _nowUs() + offsetUs;
+      final playing = st['play'] == true;
+      final basePos = (st['pos'] as num).toDouble();
+      final exp = playing ? basePos + (hostNow - (st['at'] as num).toInt()) / 1000.0 + userOffsetMs : basePos;
+      if (!playing) {
+        if (player.playing) { await player.pause(); }
+        if ((player.position.inMilliseconds - exp).abs() > 120) { await player.seek(Duration(milliseconds: m.max(0, exp.round()))); }
+        await player.setSpeed(1);
+        return;
+      }
+      if (!player.playing) {
+        await player.seek(Duration(milliseconds: m.max(0, exp.round())));
+        await player.play();
+        return;
+      }
+      final diff = player.position.inMilliseconds - exp;
+      if (diff.abs() > 250) {
+        await player.seek(Duration(milliseconds: m.max(0, exp.round())));
+        await player.setSpeed(1);
+      } else if (diff.abs() > 35) {
+        await player.setSpeed(diff > 0 ? 1 - m.min(.04, diff.abs() / 3000) : 1 + m.min(.04, diff.abs() / 3000));
+      } else {
+        await player.setSpeed(1);
+      }
+    } catch (_) {
+    } finally { _following = false; }
+  }
+
+  void setOffset(double v) { userOffsetMs = v; notifyListeners(); }
+
+  void _teardownGuest() {
+    _tPing?.cancel(); _tFollow?.cancel(); _tStart?.cancel();
+    try { _ws?.close(); } catch (_) {}
+    _ws = null; joined = false; last = null; loadedKey = ''; missing = '';
+    try { player.setSpeed(1); } catch (_) {}
+    notifyListeners();
+  }
+
+  Future<void> leave() async {
+    _tHost?.cancel(); _tDeb?.cancel();
+    for (final s in _subs) { await s.cancel(); }
+    _subs.clear();
+    for (final w in List<WebSocket>.of(_clients)) { try { await w.close(); } catch (_) {} }
+    _clients.clear(); _names.clear(); members = [];
+    try { await _srv?.close(force: true); } catch (_) {}
+    _srv = null;
+    final wasGuest = joined;
+    hosting = false; code = '';
+    if (_ws != null || wasGuest) { _teardownGuest(); if (wasGuest) { try { await player.pause(); } catch (_) {} } }
+    notifyListeners();
+  }
+}
+final party = PartyHub();
+
+class PartyPage extends StatefulWidget { const PartyPage({super.key}); @override State<PartyPage> createState() => _PPS(); }
+class _PPS extends State<PartyPage> {
+  final codeC = TextEditingController(), nameC = TextEditingController();
+  String msg = '';
+  bool busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    SharedPreferences.getInstance().then((sp) { if (mounted) { nameC.text = sp.getString('partyName') ?? ''; } });
+  }
+  @override
+  void dispose() { codeC.dispose(); nameC.dispose(); super.dispose(); }
+
+  Future<void> _saveName() async => (await SharedPreferences.getInstance()).setString('partyName', nameC.text.trim());
+
+  Widget _card(List<Widget> kids) => Container(margin: const EdgeInsets.only(bottom: 12), padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(color: th.ac.withOpacity(.09), borderRadius: BorderRadius.circular(26)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: kids));
+
+  @override
+  Widget build(BuildContext c) {
+    Theme.of(c);
+    return Scaffold(
+      appBar: AppBar(title: const Text('Music Party'), backgroundColor: Colors.transparent),
+      body: ListenableBuilder(listenable: party, builder: (_, __) {
+        final children = <Widget>[];
+        if (party.hosting) {
+          children.add(_card([
+            Text('YOUR PARTY', style: TextStyle(fontSize: 12, letterSpacing: 2, color: th.ac, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            SelectableText(party.code, style: const TextStyle(fontSize: 34, fontWeight: FontWeight.w700, letterSpacing: 3)),
+            const SizedBox(height: 6),
+            const Text('Tell your friends this code. They open Music Party, tap Join and type it. Everyone must be on the same Wi-Fi, or on your hotspot.', style: TextStyle(fontSize: 13)),
+            const SizedBox(height: 10),
+            Wrap(spacing: 8, children: [
+              OutlinedButton.icon(onPressed: () { Clipboard.setData(ClipboardData(text: party.code)); snack('Code copied.'); }, icon: const Icon(Icons.copy_rounded, size: 18), label: const Text('Copy code')),
+              FilledButton.icon(onPressed: () async { await party.leave(); setState(() => msg = 'Party ended.'); }, icon: const Icon(Icons.stop_rounded, size: 18), label: const Text('End party')),
+            ]),
+          ]));
+          children.add(_card([
+            Text('${party.members.length} friend${party.members.length == 1 ? '' : 's'} connected', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 4),
+            Text(party.members.isEmpty ? 'Waiting for friends to join…' : party.members.join(', '), style: TextStyle(color: th.tx.withOpacity(.7))),
+            SwitchListTile(contentPadding: EdgeInsets.zero, title: const Text('Friends can control playback'), subtitle: const Text('Play, pause, next and previous'),
+                value: party.allowControl, onChanged: party.setAllow),
+            const Text('Just play music as usual. Whatever you play is shared with everyone, in sync.', style: TextStyle(fontSize: 12.5)),
+          ]));
+        } else if (party.joined) {
+          final trk = party.last?['trk'];
+          children.add(_card([
+            Text('CONNECTED TO ${party.hostName.toUpperCase()}', style: TextStyle(fontSize: 12, letterSpacing: 2, color: th.ac, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 10),
+            Text(trk is Map ? (trk['t'] ?? '').toString() : 'Waiting for the host to play something…', maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600)),
+            if (trk is Map) Text((trk['a'] ?? '').toString(), style: TextStyle(color: th.tx.withOpacity(.7))),
+            if (party.missing.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 8), child: Text(party.missing, style: TextStyle(color: th.ac, fontSize: 12.5))),
+            const SizedBox(height: 10),
+            Text('Timing: clock gap ${(party.offsetUs / 1000).round()} ms, network trip ${(party.rttUs / 1000).toStringAsFixed(0)} ms', style: TextStyle(fontSize: 12, color: th.tx.withOpacity(.65))),
+            if (party.members.isNotEmpty) Text('In the party: ${party.members.join(', ')}', style: TextStyle(fontSize: 12, color: th.tx.withOpacity(.65))),
+          ]));
+          children.add(_card([
+            const Text('Sync nudge', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            const Text('If you hear an echo with a friend nearby, slide until it sounds like one voice. Bluetooth speakers usually need a nudge.', style: TextStyle(fontSize: 12.5)),
+            Row(children: [
+              Text('${party.userOffsetMs.round()} ms', style: const TextStyle(fontSize: 13)),
+              Expanded(child: Slider(value: party.userOffsetMs, min: -400, max: 400, divisions: 160, onChanged: party.setOffset)),
+            ]),
+            if (party.allowControl) Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              IconButton.filledTonal(onPressed: () => party.sendCmd('prev'), icon: const Icon(Icons.skip_previous_rounded)),
+              const SizedBox(width: 12),
+              IconButton.filled(onPressed: () => party.sendCmd('toggle'), icon: const Icon(Icons.play_arrow_rounded), iconSize: 32),
+              const SizedBox(width: 12),
+              IconButton.filledTonal(onPressed: () => party.sendCmd('next'), icon: const Icon(Icons.skip_next_rounded)),
+            ]),
+            const SizedBox(height: 6),
+            Align(alignment: Alignment.centerRight, child: FilledButton.icon(onPressed: () async { await party.leave(); }, icon: const Icon(Icons.logout_rounded, size: 18), label: const Text('Leave party'))),
+          ]));
+        } else {
+          children.add(_card([
+            const Text('Host a party', style: TextStyle(fontSize: 19, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 4),
+            const Text('You choose the music. Your friends hear the same song at the same time on their own phones.', style: TextStyle(fontSize: 13)),
+            const SizedBox(height: 12),
+            FilledButton.icon(onPressed: busy ? null : () async {
+              setState(() { busy = true; msg = ''; });
+              final e = await party.host();
+              if (mounted) { setState(() { busy = false; msg = e ?? ''; }); }
+            }, icon: const Icon(Icons.celebration_rounded), label: const Text('Start a party')),
+          ]));
+          children.add(_card([
+            const Text('Join a party', style: TextStyle(fontSize: 19, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            TextField(controller: nameC, onChanged: (_) => _saveName(), decoration: const InputDecoration(labelText: 'Your name')),
+            TextField(controller: codeC, textCapitalization: TextCapitalization.characters, decoration: const InputDecoration(labelText: 'Party code', hintText: '1X2Y3Z-4821')),
+            const SizedBox(height: 12),
+            FilledButton.icon(onPressed: busy ? null : () async {
+              setState(() { busy = true; msg = ''; });
+              final e = await party.join(codeC.text, nameC.text);
+              if (mounted) { setState(() { busy = false; msg = e ?? ''; }); }
+            }, icon: const Icon(Icons.login_rounded), label: Text(busy ? 'Connecting…' : 'Join')),
+          ]));
+        }
+        if (msg.isNotEmpty) { children.add(Padding(padding: const EdgeInsets.fromLTRB(8, 0, 8, 12), child: Text(msg, style: TextStyle(color: th.ac)))); }
+        children.add(Padding(padding: const EdgeInsets.fromLTRB(8, 4, 8, 24), child: Text(
+            'How it works: your phones stay in step with the host using a shared clock, usually within a few hundredths of a second. '
+            'Perfectly zero delay is not possible over Wi-Fi, so use Sync nudge for speakers. It works on one Wi-Fi or hotspot, not over the internet. '
+            'Each phone needs the song: a matching file in its own library, or an online song from the Online tab. Cadence never copies music files between phones.',
+            style: TextStyle(fontSize: 12, color: th.tx.withOpacity(.6)))));
+        return ListView(padding: const EdgeInsets.fromLTRB(16, 4, 16, 24), children: children);
+      }),
     );
   }
 }
